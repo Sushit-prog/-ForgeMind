@@ -1,10 +1,11 @@
 """``advance_task`` arq job — the worker's unit of work.
 
-One job = at most one state transition. The transition is applied atomically
-under a row lock (see ``advance_task_once``); if it succeeds the job
-re-enqueues itself so the pipeline keeps moving. Illegal transitions are
-caught, logged, and never silently applied. A crash between the commit and
-the re-enqueue is healed by the worker's startup sweep (Section J).
+One job = at most one state transition. PLANNING runs the real Planning
+Agent (LLM call, persisted plan); every other state uses the stub driver.
+The transition is applied atomically under a row lock; if it succeeds the
+job re-enqueues itself so the pipeline keeps moving. Illegal transitions
+are caught, logged, and never silently applied. A crash between the commit
+and the re-enqueue is healed by the worker's startup sweep (Section J).
 """
 
 from __future__ import annotations
@@ -17,10 +18,27 @@ import uuid
 from app.database.session import SessionLocal
 from app.models import TaskStatus
 from app.runtime.state_machine import TERMINAL_STATES, IllegalTransitionError
-from app.runtime.task_lifecycle import advance_task_once
+from app.runtime.task_lifecycle import advance_task_with_planner
 from app.worker.queue import JOB_ADVANCE_TASK
 
 logger = logging.getLogger(__name__)
+
+_planner = None
+
+
+def _get_planner():
+    """Lazily-built planner (real OpenRouter or stub). None when unconfigured
+    — PLANNING tasks then fail cleanly instead of hanging."""
+    global _planner
+    if _planner is None:
+        try:
+            from app.agents.planner.agent import build_planner
+
+            _planner = build_planner()
+        except Exception as exc:  # noqa: BLE001 — unconfigured provider
+            logger.warning("Planner unavailable (%s); PLANNING tasks will fail", exc)
+            _planner = None
+    return _planner
 
 
 async def advance_task(ctx: dict, task_id: str) -> None:
@@ -33,7 +51,7 @@ async def advance_task(ctx: dict, task_id: str) -> None:
     task_uuid = uuid.UUID(task_id)
     db = SessionLocal()
     try:
-        new_status = advance_task_once(db, task_uuid)
+        new_status = await advance_task_with_planner(db, task_uuid, _get_planner())
     except IllegalTransitionError as exc:
         # Deterministic guard fired: log loudly, never silently update status.
         db.rollback()

@@ -61,6 +61,24 @@ class Settings(BaseSettings):
         description="Directory for cached clones and per-task worktrees.",
     )
 
+    # LLM provider (Phase 5). The API key is a SECRET — loaded from env only,
+    # never hardcoded, never logged. Models are per-role env vars
+    # (LLM_MODEL_PLANNER, ...) so swapping models is config, not code.
+    openrouter_api_key: str | None = Field(
+        default=None, description="OpenRouter API key (secret — never logged)."
+    )
+    openrouter_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        description="OpenAI-compatible base URL (self-hosted gateways supported).",
+    )
+    llm_model_planner: str | None = Field(
+        default=None, description="Model for the planning agent (env: LLM_MODEL_PLANNER)."
+    )
+    llm_timeout_seconds: float = Field(default=60.0, description="Per-LLM-call timeout.")
+    llm_max_retries: int = Field(
+        default=2, description="Bounded transient (timeout/5xx) retries per call."
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

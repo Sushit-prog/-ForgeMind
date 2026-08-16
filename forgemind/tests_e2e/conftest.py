@@ -148,8 +148,13 @@ def wait_for(predicate, timeout: float = 30.0, interval: float = 0.1) -> bool:
 
 
 def spawn_worker(env_extra: dict[str, str] | None = None) -> subprocess.Popen:
-    """Start a worker subprocess against the e2e Postgres/Redis."""
+    """Start a worker subprocess against the e2e Postgres/Redis.
+
+    Defaults to the stub LLM provider (no API key needed); pass
+    ``FORGEMIND_MOCK_LLM_FLAKY=1`` to exercise the planner retry path.
+    """
     env = os.environ.copy()
+    env.setdefault("FORGEMIND_MOCK_LLM", "1")
     if env_extra:
         env.update(env_extra)
     return subprocess.Popen(

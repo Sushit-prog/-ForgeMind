@@ -14,8 +14,13 @@ Current milestone scope:
 - **Phase 4 — git/repository runtime**: real filesystem access. Repository discovery (clone-once
   cache), per-task git worktrees (never touching `main`), worktree-scoped file read/list/search
   with airtight path-traversal defense, and `repository.*` / `git.*` tools wired through the
-  pipeline (capability-gated, audited, fixed commit identity). No `git.push`, no `shell.*`, no
-  agents, no LLM calls yet.
+  pipeline (capability-gated, audited, fixed commit identity). No `git.push`, no `shell.*`.
+- **Phase 5 — LLM provider + Planning Agent**: the first real LLM call and the first agent whose
+  output drives the state machine. `llm/` abstracts providers (OpenRouter now, pluggable later)
+  with strict `structured_output` (never a partially-valid object); the Planning Agent turns a
+  task objective into a schema-validated plan DAG, persists it, and only then does the worker
+  move PLANNING → RESEARCHING. Malformed output retries exactly once; task text is wrapped as
+  DATA (prompt-injection defense); the planner has zero tool capabilities.
 
 ## Quick start
 
@@ -68,6 +73,10 @@ pytest tests_e2e/   # end-to-end (needs `docker compose up -d --wait`) — real 
 
 ```
 app/
+  agents/
+    base.py                 Agent ABC (capabilities are the structural boundary)
+    planner/                PlanningAgent: prompt (data-not-instructions), Plan schema +
+                            DAG validation, retry-once, persistence
   api/routes/tasks.py       Task API: create/list/get/cancel/events
   capabilities/             Capability value objects + per-agent assignment (Section H)
   database/                 engine/session + Alembic migrations
@@ -76,6 +85,11 @@ app/
     runner.py               git subprocess runner (arg lists only, fixed identity, no prompts)
     operations.py           status/diff/log/create_branch/commit on a worktree
     worktree_manager.py     per-task worktrees (create/discard/path_for) — the only branch creator
+  llm/
+    provider.py             LLMProvider ABC + parse/validate (strict structured_output)
+    openrouter.py           OpenAI-compatible provider (httpx, timeouts -> LLMTimeoutError)
+    mock.py                 deterministic stub provider (tests / key-less dev)
+    config.py               role -> model from env (LLM_MODEL_PLANNER, ...)
   models/                   SQLAlchemy models (Section-G schema) + ExecutionEvent + ToolCall
   policies/                 deterministic PolicyEngine + risk-default & explicit-deny rules
   repository/
@@ -83,17 +97,17 @@ app/
     file_access.py          worktree-scoped read/list/search — traversal-safe
   runtime/
     state_machine.py        Section-D legal-transition table — pure logic, no I/O
-    task_lifecycle.py       atomic transitions + execution_events + stub pipeline driver
+    task_lifecycle.py       transitions + events + stub driver + advance_task_with_planner
   schemas/                  Pydantic request/response schemas
   tools/                    Tool ABC + registry + example tools + repository.* / git.* tools
   worker/
     queue.py                arq Redis settings + pool + enqueue helper
-    jobs/advance_task.py    one job = one transition (FOR UPDATE, re-enqueue)
+    jobs/advance_task.py    one job = one transition (PLANNING runs the real planner)
     worker.py               arq entrypoint + startup sweep (crash recovery)
   config.py                 env-driven settings (secrets never hardcoded/logged)
   logging.py                logging setup with URL redaction
   main.py                   FastAPI app + /health + fail-fast DB check
-tests/                      hermetic suite (SQLite + real local git repos)
+tests/                      hermetic suite (SQLite + real local git repos + stubbed LLM)
 tests_e2e/                  end-to-end suite (Postgres + Redis + worker subprocesses)
 ```
 
@@ -116,6 +130,25 @@ validate input -> capability check -> policy check -> execute -> audit
 
 Example tools prove the paths: `example.echo` (executes), `example.read_file`
 (denied without `repo.read`), `example.denied` (denied by explicit policy).
+
+## LLM provider + Planning Agent (Phase 5)
+
+- **`llm/` provider abstraction**: `structured_output` either returns a fully-valid object or
+  raises `LLMMalformedOutputError` with the raw output attached — malformed JSON and
+  valid-JSON-with-wrong-shape are both rejected. Models are per-role env vars
+  (`LLM_MODEL_PLANNER`), never hardcoded. `FORGEMIND_MOCK_LLM=1` runs a deterministic stub
+  provider (tests / key-less dev); a configured `OPENROUTER_API_KEY` always wins.
+- **Planning Agent**: task objective in → schema-validated plan DAG out → persisted to
+  `plans`/`plan_steps` (raw output in `plans.raw_llm_output`) → PLANNING → RESEARCHING fires
+  only after that. DAG rules: unique ids, no dangling deps, no cycles, every implement step
+  has a research ancestor.
+- **Retry boundary**: transient errors (timeout, 429/5xx) retry with bounded backoff; the
+  malformed/invalid retry happens exactly ONCE with a correction prompt; a second failure
+  raises and the task goes FAILED (never ESCALATED), raw output preserved.
+- **Prompt injection**: task objective/repo metadata sit in a `<reference_data>` block and the
+  system prompt declares them DATA, not instructions. Tests feed injection-style objectives
+  and prove the injected payload can never become a persisted plan.
+- **Planner capabilities are structurally empty** — it cannot invoke any tool.
 
 ## Git/repository runtime (Phase 4)
 
@@ -145,10 +178,10 @@ its last persisted status; the worker's startup sweep re-enqueues it from there.
 
 ## Schema
 
-Tables (architecture doc section G, milestone scope): `tasks`, `plans`, `plan_steps`,
-`task_steps`, `capabilities`, `policies`, `audit_logs`, `repositories` (incl.
-`local_clone_path`), `worktrees`, `execution_events`, `tool_calls`. Remaining Section-G tables
-arrive with the phases that use them (agents/eval).
+Tables (architecture doc section G, milestone scope): `tasks`, `plans` (incl.
+`raw_llm_output`), `plan_steps`, `task_steps`, `capabilities`, `policies`, `audit_logs`,
+`repositories` (incl. `local_clone_path`), `worktrees`, `execution_events`, `tool_calls`.
+Remaining Section-G tables arrive with the phases that use them (agents/eval).
 
 ## Security posture
 

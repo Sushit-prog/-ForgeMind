@@ -143,6 +143,10 @@ def advance_task_once(db: Session, task_id: uuid.UUID) -> TaskStatus | None:
     Returns the new status, or None when there is nothing to do (terminal
     task, cancelled task, or unknown id). Illegal transitions raise
     ``IllegalTransitionError`` and never silently update ``tasks.status``.
+
+    This is the STUB driver (Phase 2): PLANNING -> RESEARCHING happens
+    without a real plan. The worker uses ``advance_task_with_planner``
+    instead, which routes PLANNING through the real PlanningAgent.
     """
     task = db.execute(
         select(Task).where(Task.id == task_id).with_for_update()
@@ -172,3 +176,59 @@ def advance_task_once(db: Session, task_id: uuid.UUID) -> TaskStatus | None:
     db.commit()
     logger.info("Task %s: %s -> %s", task_id, previous.value, target.value)
     return target
+
+
+async def advance_task_with_planner(
+    db: Session, task_id: uuid.UUID, planner
+) -> TaskStatus | None:
+    """Worker unit of work (Phase 5): PLANNING runs the real PlanningAgent.
+
+    - PLANNING: call ``planner.run``; on success persist happened inside the
+      planner and we transition PLANNING -> RESEARCHING. On failure the task
+      goes FAILED (never ESCALATED — that is reserved for replan-budget
+      exhaustion), with the reason recorded on the execution event.
+    - every other state: identical to the stub ``advance_task_once``.
+
+    ``planner`` may be None (no provider configured) — PLANNING then fails
+    the task cleanly with ``no_llm_provider`` instead of hanging.
+    """
+    task = db.execute(
+        select(Task).where(Task.id == task_id).with_for_update()
+    ).scalar_one_or_none()
+    if task is None:
+        logger.warning("advance_task_with_planner: task %s not found", task_id)
+        return None
+
+    if TaskStatus(task.status) is not TaskStatus.PLANNING:
+        return advance_task_once(db, task_id)
+
+    if planner is None:
+        logger.error("Task %s in PLANNING but no LLM provider configured", task_id)
+        transition_task(db, task, TaskStatus.FAILED, reason="no_llm_provider")
+        db.commit()
+        return TaskStatus.FAILED
+
+    from app.agents.planner.schema import PlanValidationError
+    from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
+    from app.tools.base import ExecutionContext
+
+    ctx = ExecutionContext(task_id=task.id, agent_type="planner", db=db)
+    previous = TaskStatus(task.status)
+    try:
+        await planner.run(task, ctx)
+    except PlanValidationError as exc:
+        logger.error("Task %s plan invalid after retry: %s", task_id, exc)
+        transition_task(db, task, TaskStatus.FAILED, reason="plan_validation_failed")
+    except (LLMTimeoutError, LLMMalformedOutputError) as exc:
+        logger.error("Task %s planner LLM error: %s", task_id, exc)
+        transition_task(db, task, TaskStatus.FAILED, reason="llm_error")
+    except Exception:  # noqa: BLE001 — any planner failure fails the task, never hangs
+        logger.exception("Task %s planner crashed", task_id)
+        transition_task(db, task, TaskStatus.FAILED, reason="planning_error")
+    else:
+        # A real, persisted, schema-validated plan exists — only now may the
+        # task leave PLANNING.
+        transition_task(db, task, TaskStatus.RESEARCHING, reason="plan_persisted")
+        logger.info("Task %s: %s -> RESEARCHING (real plan persisted)", task_id, previous.value)
+    db.commit()
+    return TaskStatus(task.status)

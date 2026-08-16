@@ -38,6 +38,10 @@ services:
       DATABASE_URL: postgresql+psycopg://forgemind:forgemind@db:5432/forgemind
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: INFO
+      # Stub LLM provider so the dev stack works out of the box. When
+      # OPENROUTER_API_KEY is set (e.g. via .env), build_planner prefers the
+      # real provider and this flag is ignored.
+      FORGEMIND_MOCK_LLM: "1"
     depends_on:
       db:
         condition: service_healthy

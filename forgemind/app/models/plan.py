@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, JsonType, utcnow
@@ -32,6 +32,9 @@ class Plan(Base):
         ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE")
+    # Raw LLM output for debugging/reproducibility (Section 47). Stored
+    # redacted + truncated; set on both successful and failed plans.
+    raw_llm_output: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
     )
