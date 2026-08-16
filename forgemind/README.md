@@ -7,7 +7,10 @@ Current milestone scope:
 - **Phase 1 — foundation layer**: project skeleton, config, database schema, minimal FastAPI Task API.
 - **Phase 2 — task runtime**: an enforced Section-D state machine, an `execution_events` trail,
   and an arq + Redis worker that drives tasks `CREATED → PLANNING → … → COMPLETED` entirely off
-  the queue. No agents, no LLM calls, no tools yet.
+  the queue.
+- **Phase 3 — tool runtime**: typed tool registry, capability model, deterministic policy engine,
+  and the full tool pipeline (validate → capability → policy → execute → audit) with three
+  harmless example tools. No agents and no real side-effecting tools yet.
 
 ## Quick start
 
@@ -61,12 +64,16 @@ pytest tests_e2e/   # end-to-end (needs `docker compose up -d --wait`) — real 
 ```
 app/
   api/routes/tasks.py       Task API: create/list/get/cancel/events
+  capabilities/             Capability value objects + per-agent assignment (Section H)
   database/                 engine/session + Alembic migrations
-  models/                   SQLAlchemy models (Section-G schema) + ExecutionEvent
+  execution/tool_pipeline.py  validate -> capability -> policy -> execute -> audit
+  models/                   SQLAlchemy models (Section-G schema) + ExecutionEvent + ToolCall
+  policies/                 deterministic PolicyEngine + risk-default & explicit-deny rules
   runtime/
     state_machine.py        Section-D legal-transition table — pure logic, no I/O
     task_lifecycle.py       atomic transitions + execution_events + stub pipeline driver
   schemas/                  Pydantic request/response schemas
+  tools/                    Tool ABC + registry + example tools (echo / read_file / denied)
   worker/
     queue.py                arq Redis settings + pool + enqueue helper
     jobs/advance_task.py    one job = one transition (FOR UPDATE, re-enqueue)
@@ -77,6 +84,28 @@ app/
 tests/                      hermetic suite (SQLite)
 tests_e2e/                  end-to-end suite (Postgres + Redis + worker subprocesses)
 ```
+
+## Tool pipeline (architecture doc sections F/H)
+
+Every tool invocation goes through `app/execution/tool_pipeline.py`:
+
+```
+validate input -> capability check -> policy check -> execute -> audit
+```
+
+- **Exactly one `tool_calls` row per invocation**, whatever the outcome
+  (DENIED / EXECUTED / FAILED; ALLOWED is the transient admit state).
+- **Fail-closed policy engine**: pure functions over typed input, no LLM;
+  any rule's DENY wins over any ALLOW vote.
+- **Secrets redacted** from stored input/output (`redact_sensitive`) — the
+  structured-data analogue of the Phase-1 URL redaction.
+- Contract errors (unknown tool, malformed input) raise loudly and never
+  execute or write a row.
+
+Example tools prove the paths: `example.echo` (executes), `example.read_file`
+(denied without `repo.read`), `example.denied` (denied by explicit policy).
+Real tools (`repository.*`, `git.*`, `shell.*`, `github.*`) register through
+the same `ToolRegistry` in later phases.
 
 ## State machine (architecture doc section D)
 
@@ -90,8 +119,8 @@ its last persisted status; the worker's startup sweep re-enqueues it from there.
 
 Tables (architecture doc section G, milestone scope): `tasks`, `plans`, `plan_steps`,
 `task_steps`, `capabilities`, `policies`, `audit_logs`, `repositories`, `worktrees`,
-`execution_events`. Remaining Section-G tables arrive with the phases that use them
-(agents/tools/eval).
+`execution_events`, `tool_calls`. Remaining Section-G tables arrive with the phases that
+use them (agents/eval).
 
 ## Security posture
 

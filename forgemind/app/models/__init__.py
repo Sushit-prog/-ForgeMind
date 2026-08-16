@@ -18,6 +18,7 @@ from app.models.plan import Plan, PlanStep
 from app.models.policy import Policy
 from app.models.repository import Repository, Worktree
 from app.models.task import Task, TaskStatus, TaskStep
+from app.models.tool_call import ToolCall, ToolCallStatus
 
 __all__ = [
     "AuditLog",
@@ -32,5 +33,7 @@ __all__ = [
     "Task",
     "TaskStatus",
     "TaskStep",
+    "ToolCall",
+    "ToolCallStatus",
     "Worktree",
 ]

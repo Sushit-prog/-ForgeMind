@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "forgemind"
 version = "0.1.0"
-description = "Autonomous software-engineering agent: GitHub issue -> investigate -> implement -> test -> review -> PR. Foundation layer + task runtime (Phases 1-2)."
+description = "Autonomous software-engineering agent: GitHub issue -> investigate -> implement -> test -> review -> PR. Foundation, task runtime, and tool runtime (Phases 1-3)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
