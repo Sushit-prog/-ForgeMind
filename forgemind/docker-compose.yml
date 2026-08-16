@@ -1,0 +1,22 @@
+# Local development database only — production uses Supabase Postgres.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: forgemind-db
+    environment:
+      POSTGRES_USER: forgemind
+      POSTGRES_PASSWORD: forgemind
+      POSTGRES_DB: forgemind
+    # 5433 on the host: some machines run a system Postgres on 5432.
+    ports:
+      - "5433:5432"
+    volumes:
+      - forgemind_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgemind -d forgemind"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  forgemind_pgdata:

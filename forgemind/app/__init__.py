@@ -1,0 +1,1 @@
+"""ForgeMind application package."""
