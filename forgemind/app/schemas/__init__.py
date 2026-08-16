@@ -1,3 +1,3 @@
-from app.schemas.task import TaskCreate, TaskRead
+from app.schemas.task import ExecutionEventRead, TaskCreate, TaskRead
 
-__all__ = ["TaskCreate", "TaskRead"]
+__all__ = ["ExecutionEventRead", "TaskCreate", "TaskRead"]

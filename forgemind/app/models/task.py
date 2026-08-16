@@ -57,6 +57,7 @@ class Task(Base):
     max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_runtime: Mapped[int | None] = mapped_column(Integer, nullable=True)  # seconds
     max_replans: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    replan_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()

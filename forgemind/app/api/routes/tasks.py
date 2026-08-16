@@ -1,8 +1,10 @@
-"""Task API routes (milestone Phase 1 contract).
+"""Task API routes (Phase 1 + Phase 2 contracts).
 
-POST /tasks        {objective, repository_url} -> 201 {id, status: "CREATED"}
-GET  /tasks        -> list of tasks
-GET  /tasks/{id}   -> full task record
+POST /tasks                {objective, repository_url} -> 201, enqueues advance_task
+GET  /tasks                -> list of tasks
+GET  /tasks/{id}           -> full task record
+POST /tasks/{id}/cancel    -> transition to FAILED ("user_cancelled"), enqueues nothing
+GET  /tasks/{id}/events    -> execution_events, ordered by created_at
 """
 
 from __future__ import annotations
@@ -15,8 +17,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
-from app.models import AuditLog, Repository, Task, TaskStatus
-from app.schemas import TaskCreate, TaskRead
+from app.models import AuditLog, ExecutionEvent, Repository, Task, TaskStatus
+from app.runtime.state_machine import TERMINAL_STATES
+from app.runtime.task_lifecycle import USER_CANCELLED, transition_task
+from app.schemas import ExecutionEventRead, TaskCreate, TaskRead
+from app.worker.queue import enqueue_advance_task
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +43,8 @@ def _get_or_create_repository(db: Session, url: str) -> Repository:
 
 
 @router.post("", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
-def create_task(payload: TaskCreate, db: Session = Depends(get_db)) -> Task:
-    """Create a task in CREATED state and record an audit entry."""
+async def create_task(payload: TaskCreate, db: Session = Depends(get_db)) -> Task:
+    """Create a task in CREATED state, record an audit entry, enqueue the worker."""
     repository = _get_or_create_repository(db, payload.repository_url)
 
     task = Task(
@@ -63,6 +68,14 @@ def create_task(payload: TaskCreate, db: Session = Depends(get_db)) -> Task:
     db.commit()
     db.refresh(task)
     logger.info("Task %s created (status=%s)", task.id, task.status)
+
+    # Hand off to the worker — the API never drives transitions synchronously.
+    # If the queue is unavailable the task stays CREATED and the worker's
+    # startup sweep picks it up later.
+    try:
+        await enqueue_advance_task(task.id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to enqueue advance_task for %s — will be swept later", task.id)
     return task
 
 
@@ -81,3 +94,46 @@ def get_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+@router.post("/{task_id}/cancel", response_model=TaskRead)
+def cancel_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
+    """Cancel a task: transition to FAILED with reason ``user_cancelled``.
+
+    Row-locked so it cannot race a worker transition. Terminal tasks
+    (COMPLETED/ESCALATED) and already-FAILED tasks return 409 — never a
+    silent no-op.
+    """
+    task = db.execute(
+        select(Task).where(Task.id == task_id).with_for_update()
+    ).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    current = TaskStatus(task.status)
+    if current in TERMINAL_STATES or current is TaskStatus.FAILED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot cancel task in state {current.value}",
+        )
+
+    transition_task(db, task, TaskStatus.FAILED, reason=USER_CANCELLED)
+    db.commit()
+    db.refresh(task)
+    logger.info("Task %s cancelled by user (%s -> FAILED)", task.id, current.value)
+    return task
+
+
+@router.get("/{task_id}/events", response_model=list[ExecutionEventRead])
+def list_events(task_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ExecutionEvent]:
+    """Execution-event trail for a task, oldest first."""
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return list(
+        db.scalars(
+            select(ExecutionEvent)
+            .where(ExecutionEvent.task_id == task_id)
+            .order_by(ExecutionEvent.created_at, ExecutionEvent.id)
+        )
+    )

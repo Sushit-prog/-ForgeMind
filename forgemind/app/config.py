@@ -38,6 +38,22 @@ class Settings(BaseSettings):
     # Fail-fast startup: how long to wait for the DB before giving up.
     db_connect_timeout_seconds: int = 5
 
+    # arq/Redis backing the worker queue (local dev: docker-compose redis).
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Redis URL for the arq task queue (never logged).",
+    )
+
+    # On worker startup, re-enqueue any non-terminal tasks left behind by a
+    # crash (Section J: resume from last checkpoint). Disable in tests that
+    # need exact control over queued jobs.
+    worker_sweep_enabled: bool = True
+
+    # Master switch for the arq queue. When False (hermetic unit tests), the
+    # API still creates/persists tasks but never touches Redis — the worker's
+    # startup sweep would pick them up if a queue were present.
+    queue_enabled: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

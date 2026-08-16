@@ -59,5 +59,19 @@ class TaskRead(BaseModel):
     objective: str
     repository_id: uuid.UUID
     status: str
+    replan_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+class ExecutionEventRead(BaseModel):
+    """Response body for one execution-event record."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    task_id: uuid.UUID
+    from_status: str
+    to_status: str
+    reason: str | None
+    created_at: datetime

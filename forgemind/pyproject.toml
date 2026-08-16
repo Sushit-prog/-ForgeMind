@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "forgemind"
 version = "0.1.0"
-description = "Autonomous software-engineering agent: GitHub issue -> investigate -> implement -> test -> review -> PR. Foundation layer (Phase 1)."
+description = "Autonomous software-engineering agent: GitHub issue -> investigate -> implement -> test -> review -> PR. Foundation layer + task runtime (Phases 1-2)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -17,6 +17,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
+    "arq>=0.26",
 ]
 
 [project.optional-dependencies]
@@ -32,3 +33,5 @@ include = ["app*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# End-to-end suite (tests_e2e/) needs Docker Postgres + Redis and is run
+# separately: `pytest tests_e2e/` — see README.

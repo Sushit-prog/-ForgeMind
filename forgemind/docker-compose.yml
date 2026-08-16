@@ -18,5 +18,32 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    container_name: forgemind-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build: .
+    container_name: forgemind-worker
+    # Migrate on boot (env.py reads DATABASE_URL), then run the arq worker.
+    command: sh -c "alembic upgrade head && python -m app.worker.worker"
+    environment:
+      DATABASE_URL: postgresql+psycopg://forgemind:forgemind@db:5432/forgemind
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   forgemind_pgdata:

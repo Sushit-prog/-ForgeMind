@@ -17,6 +17,9 @@ _TMP_DB.close()
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP_DB.name.replace(os.sep, '/')}"
 os.environ["ENVIRONMENT"] = "test"
 os.environ["LOG_LEVEL"] = "WARNING"
+# Hermetic unit tests: the API must not touch Redis. Tasks stay CREATED and
+# the worker's startup sweep would collect them if a queue existed.
+os.environ["QUEUE_ENABLED"] = "false"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -38,9 +41,15 @@ def client():
 
 @pytest.fixture()
 def db_session():
-    """Direct session for asserting on persisted rows (e.g. audit log)."""
+    """Direct session for asserting on persisted rows (e.g. audit log).
+
+    Creates the schema itself so it works standalone (state-machine/lifecycle
+    tests never touch the API client). Idempotent when paired with ``client``.
+    """
+    Base.metadata.create_all(engine)
     session = SessionLocal()
     try:
         yield session
     finally:
         session.close()
+        Base.metadata.drop_all(engine)
