@@ -1,11 +1,13 @@
 """``advance_task`` arq job — the worker's unit of work.
 
 One job = at most one state transition. PLANNING runs the real Planning
-Agent (LLM call, persisted plan); every other state uses the stub driver.
-The transition is applied atomically under a row lock; if it succeeds the
-job re-enqueues itself so the pipeline keeps moving. Illegal transitions
-are caught, logged, and never silently applied. A crash between the commit
-and the re-enqueue is healed by the worker's startup sweep (Section J).
+Agent (LLM call, persisted plan); RESEARCHING runs the real Research
+Agent (bounded tool-use loop, persisted artifact); every other state uses
+the stub driver. The transition is applied atomically under a row lock;
+if it succeeds the job re-enqueues itself so the pipeline keeps moving.
+Illegal transitions are caught, logged, and never silently applied. A
+crash between the commit and the re-enqueue is healed by the worker's
+startup sweep (Section J).
 """
 
 from __future__ import annotations
@@ -18,12 +20,13 @@ import uuid
 from app.database.session import SessionLocal
 from app.models import TaskStatus
 from app.runtime.state_machine import TERMINAL_STATES, IllegalTransitionError
-from app.runtime.task_lifecycle import advance_task_with_planner
+from app.runtime.task_lifecycle import advance_task_with_agents
 from app.worker.queue import JOB_ADVANCE_TASK
 
 logger = logging.getLogger(__name__)
 
 _planner = None
+_researcher = None
 
 
 def _get_planner():
@@ -41,6 +44,21 @@ def _get_planner():
     return _planner
 
 
+def _get_researcher():
+    """Lazily-built researcher (real OpenRouter or stub). None when
+    unconfigured — RESEARCHING tasks then fail cleanly instead of hanging."""
+    global _researcher
+    if _researcher is None:
+        try:
+            from app.agents.researcher.agent import build_researcher
+
+            _researcher = build_researcher()
+        except Exception as exc:  # noqa: BLE001 — unconfigured provider
+            logger.warning("Researcher unavailable (%s); RESEARCHING tasks will fail", exc)
+            _researcher = None
+    return _researcher
+
+
 async def advance_task(ctx: dict, task_id: str) -> None:
     """Load the task, apply the next legal transition, persist, re-enqueue."""
     # Test/ops knob: simulate slow transitions so crash windows are observable.
@@ -51,7 +69,9 @@ async def advance_task(ctx: dict, task_id: str) -> None:
     task_uuid = uuid.UUID(task_id)
     db = SessionLocal()
     try:
-        new_status = await advance_task_with_planner(db, task_uuid, _get_planner())
+        new_status = await advance_task_with_agents(
+            db, task_uuid, _get_planner(), _get_researcher()
+        )
     except IllegalTransitionError as exc:
         # Deterministic guard fired: log loudly, never silently update status.
         db.rollback()

@@ -14,7 +14,7 @@ from app.agents.planner.agent import PlanningAgent
 from app.llm import StubLLMProvider
 from app.llm.mock import MALFORMED_RESPONSE
 from app.models import ExecutionEvent, Plan, Task, TaskStatus
-from app.runtime.task_lifecycle import advance_task_with_planner, transition_task
+from app.runtime.task_lifecycle import advance_task_with_agents, transition_task
 
 
 def run(coro):
@@ -45,7 +45,7 @@ def test_planning_transition_persists_plan_and_moves_to_researching(
     task = make_planning_task(db_session, repo_task)
     planner = PlanningAgent(StubLLMProvider())
 
-    new_status = run(advance_task_with_planner(db_session, task.id, planner))
+    new_status = run(advance_task_with_agents(db_session, task.id, planner=planner))
 
     assert new_status is TaskStatus.RESEARCHING
     db_session.expire_all()
@@ -64,7 +64,7 @@ def test_failed_plan_goes_to_failed_not_escalated(db_session, repo_task) -> None
     task = make_planning_task(db_session, repo_task)
     planner = PlanningAgent(StubLLMProvider(responses=[MALFORMED_RESPONSE, MALFORMED_RESPONSE]))
 
-    new_status = run(advance_task_with_planner(db_session, task.id, planner))
+    new_status = run(advance_task_with_agents(db_session, task.id, planner=planner))
 
     assert new_status is TaskStatus.FAILED  # never ESCALATED
     db_session.expire_all()
@@ -81,7 +81,7 @@ def test_failed_plan_goes_to_failed_not_escalated(db_session, repo_task) -> None
 def test_no_planner_fails_task_cleanly(db_session, repo_task) -> None:
     task = make_planning_task(db_session, repo_task)
 
-    new_status = run(advance_task_with_planner(db_session, task.id, None))
+    new_status = run(advance_task_with_agents(db_session, task.id))
 
     assert new_status is TaskStatus.FAILED
     db_session.expire_all()
@@ -98,7 +98,7 @@ def test_non_planning_states_use_stub_and_never_call_planner(db_session, repo_ta
 
     provider = StubLLMProvider()
     planner = PlanningAgent(provider)
-    new_status = run(advance_task_with_planner(db_session, task.id, planner))
+    new_status = run(advance_task_with_agents(db_session, task.id, planner=planner))
 
     assert new_status is TaskStatus.TESTING  # stub IMPLEMENTING -> TESTING
     assert provider.structured_calls == []  # planner never invoked

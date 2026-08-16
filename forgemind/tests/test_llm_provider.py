@@ -21,7 +21,7 @@ from app.llm import (
     is_transient_error,
     parse_and_validate,
 )
-from app.llm.mock import DEFAULT_PLAN_RESPONSE, MALFORMED_RESPONSE
+from app.llm.mock import DEFAULT_PLAN_RESPONSE, MALFORMED_RESPONSE, default_by_schema
 
 VALID = json.loads(DEFAULT_PLAN_RESPONSE)
 
@@ -69,7 +69,7 @@ def test_unknown_step_type_raises() -> None:
 def test_stub_structured_output_returns_valid_plan() -> None:
     import asyncio
 
-    provider = StubLLMProvider()
+    provider = StubLLMProvider(by_schema=default_by_schema())
     plan = asyncio.run(provider.structured_output([], Plan))  # type: ignore[arg-type]
     assert isinstance(plan, Plan)
 

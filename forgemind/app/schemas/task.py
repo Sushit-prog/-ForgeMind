@@ -40,12 +40,16 @@ class TaskCreate(BaseModel):
             return value
 
         parts = urlsplit(value)
-        if parts.scheme not in {"http", "https", "ssh", "git"}:
+        # file:// is accepted for local development/testing (clone a local
+        # repo); production URLs use the remote schemes.
+        if parts.scheme not in {"http", "https", "ssh", "git", "file"}:
             raise ValueError(
                 "repository_url must be a well-formed git URL "
                 "(e.g. https://github.com/org/repo.git or git@github.com:org/repo.git)"
             )
-        if not parts.netloc or not parts.path or parts.path.strip("/") == "":
+        if parts.scheme != "file" and (
+            not parts.netloc or not parts.path or parts.path.strip("/") == ""
+        ):
             raise ValueError("repository_url must include a host and a repository path")
         return value
 

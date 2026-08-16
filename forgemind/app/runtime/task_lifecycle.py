@@ -144,9 +144,9 @@ def advance_task_once(db: Session, task_id: uuid.UUID) -> TaskStatus | None:
     task, cancelled task, or unknown id). Illegal transitions raise
     ``IllegalTransitionError`` and never silently update ``tasks.status``.
 
-    This is the STUB driver (Phase 2): PLANNING -> RESEARCHING happens
-    without a real plan. The worker uses ``advance_task_with_planner``
-    instead, which routes PLANNING through the real PlanningAgent.
+    This is the STUB driver (Phase 2): no agent work. The worker uses
+    ``advance_task_with_agents`` instead, which routes PLANNING and
+    RESEARCHING through the real Planning/Research agents.
     """
     task = db.execute(
         select(Task).where(Task.id == task_id).with_for_update()
@@ -178,57 +178,165 @@ def advance_task_once(db: Session, task_id: uuid.UUID) -> TaskStatus | None:
     return target
 
 
-async def advance_task_with_planner(
-    db: Session, task_id: uuid.UUID, planner
+async def advance_task_with_agents(
+    db: Session,
+    task_id: uuid.UUID,
+    planner=None,
+    researcher=None,
 ) -> TaskStatus | None:
-    """Worker unit of work (Phase 5): PLANNING runs the real PlanningAgent.
+    """Worker unit of work (Phases 5/6): the LLM states run the real agents.
 
-    - PLANNING: call ``planner.run``; on success persist happened inside the
-      planner and we transition PLANNING -> RESEARCHING. On failure the task
-      goes FAILED (never ESCALATED — that is reserved for replan-budget
-      exhaustion), with the reason recorded on the execution event.
+    - PLANNING: run ``planner.run``; RESEARCHING: run ``researcher.run``.
+      Each persists its artifact, and the transition to the next state fires
+      only after persistence. On failure the task goes FAILED (never
+      ESCALATED — reserved for replan-budget exhaustion), with the reason on
+      the execution event.
     - every other state: identical to the stub ``advance_task_once``.
 
-    ``planner`` may be None (no provider configured) — PLANNING then fails
-    the task cleanly with ``no_llm_provider`` instead of hanging.
+    ``planner``/``researcher`` may be None (no provider configured) — the
+    task then fails cleanly instead of hanging.
     """
     task = db.execute(
         select(Task).where(Task.id == task_id).with_for_update()
     ).scalar_one_or_none()
     if task is None:
-        logger.warning("advance_task_with_planner: task %s not found", task_id)
+        logger.warning("advance_task_with_agents: task %s not found", task_id)
         return None
 
-    if TaskStatus(task.status) is not TaskStatus.PLANNING:
-        return advance_task_once(db, task_id)
+    current = TaskStatus(task.status)
+    if current is TaskStatus.PLANNING:
+        return await _run_planning(db, task, planner)
+    if current is TaskStatus.RESEARCHING:
+        return await _run_researching(db, task, researcher)
+    return advance_task_once(db, task_id)
 
+
+def _cas_transition(
+    db: Session,
+    task_id: uuid.UUID,
+    expected: TaskStatus,
+    target: TaskStatus,
+    reason: str | None,
+) -> TaskStatus | None:
+    """Re-lock the task row and transition ONLY if still in ``expected``.
+
+    Agent runs commit internally (plan/artifact persistence), which RELEASES
+    the FOR UPDATE lock held by ``advance_task_with_agents``. A second worker
+    can then read stale state and try to apply the same transition. This
+    compare-and-swap re-acquires the lock and refuses to transition if
+    another worker already advanced the task — the Section-D guarantee that
+    one step fires exactly once, even when two workers run the same agent
+    step concurrently.
+    """
+    # populate_existing: the session's identity map may already hold the
+    # Task (read at job start); FOR UPDATE alone does not refresh it, so
+    # without this the check would compare against STALE in-memory state.
+    locked = db.execute(
+        select(Task)
+        .where(Task.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if locked is None:
+        return None
+    if TaskStatus(locked.status) is not expected:
+        logger.info(
+            "Task %s already at %s (expected %s) — skipping %s transition",
+            task_id, locked.status, expected.value, target.value,
+        )
+        return TaskStatus(locked.status)
+    transition_task(db, locked, target, reason=reason)
+    db.commit()
+    return target
+
+
+async def _run_planning(db: Session, task: Task, planner) -> TaskStatus:
+    """PLANNING: real planner or a clean FAILED (no provider)."""
     if planner is None:
-        logger.error("Task %s in PLANNING but no LLM provider configured", task_id)
-        transition_task(db, task, TaskStatus.FAILED, reason="no_llm_provider")
-        db.commit()
-        return TaskStatus.FAILED
+        logger.error("Task %s in PLANNING but no LLM provider configured", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.PLANNING, TaskStatus.FAILED, "no_llm_provider"
+        )
 
     from app.agents.planner.schema import PlanValidationError
     from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
     from app.tools.base import ExecutionContext
 
     ctx = ExecutionContext(task_id=task.id, agent_type="planner", db=db)
-    previous = TaskStatus(task.status)
     try:
         await planner.run(task, ctx)
     except PlanValidationError as exc:
-        logger.error("Task %s plan invalid after retry: %s", task_id, exc)
-        transition_task(db, task, TaskStatus.FAILED, reason="plan_validation_failed")
+        logger.error("Task %s plan invalid after retry: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.PLANNING, TaskStatus.FAILED, "plan_validation_failed"
+        )
     except (LLMTimeoutError, LLMMalformedOutputError) as exc:
-        logger.error("Task %s planner LLM error: %s", task_id, exc)
-        transition_task(db, task, TaskStatus.FAILED, reason="llm_error")
+        logger.error("Task %s planner LLM error: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.PLANNING, TaskStatus.FAILED, "llm_error"
+        )
     except Exception:  # noqa: BLE001 — any planner failure fails the task, never hangs
-        logger.exception("Task %s planner crashed", task_id)
-        transition_task(db, task, TaskStatus.FAILED, reason="planning_error")
-    else:
-        # A real, persisted, schema-validated plan exists — only now may the
-        # task leave PLANNING.
-        transition_task(db, task, TaskStatus.RESEARCHING, reason="plan_persisted")
-        logger.info("Task %s: %s -> RESEARCHING (real plan persisted)", task_id, previous.value)
-    db.commit()
-    return TaskStatus(task.status)
+        logger.exception("Task %s planner crashed", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.PLANNING, TaskStatus.FAILED, "planning_error"
+        )
+    logger.info("Task %s -> RESEARCHING (real plan persisted)", task.id)
+    return _cas_transition(
+        db, task.id, TaskStatus.PLANNING, TaskStatus.RESEARCHING, "plan_persisted"
+    )
+
+
+async def _run_researching(db: Session, task: Task, researcher) -> TaskStatus:
+    """RESEARCHING: real research agent or a clean FAILED (no agent)."""
+    if researcher is None:
+        logger.error("Task %s in RESEARCHING but no research agent", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.RESEARCHING, TaskStatus.FAILED, "no_research_agent"
+        )
+
+    from app.agents.researcher.agent import ResearchError
+    from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
+    from app.models import Plan as PlanRow
+    from app.models import PlanStep as PlanStepRow
+    from app.tools.base import ExecutionContext
+
+    plan = db.scalar(
+        select(PlanRow).where(
+            PlanRow.task_id == task.id, PlanRow.status == "ACTIVE"
+        ).order_by(PlanRow.created_at.desc()).limit(1)
+    )
+    research_step = None
+    if plan is not None:
+        research_step = db.scalar(
+            select(PlanStepRow).where(
+                PlanStepRow.plan_id == plan.id, PlanStepRow.step_type == "research"
+            ).order_by(PlanStepRow.sequence).limit(1)
+        )
+    if research_step is None:
+        logger.error("Task %s in RESEARCHING but its active plan has no research step", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.RESEARCHING, TaskStatus.FAILED, "no_research_step"
+        )
+
+    ctx = ExecutionContext(task_id=task.id, agent_type="researcher", db=db)
+    try:
+        await researcher.run(task, research_step, ctx)
+    except ResearchError as exc:
+        logger.error("Task %s research failed: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.RESEARCHING, TaskStatus.FAILED, "research_failed"
+        )
+    except (LLMTimeoutError, LLMMalformedOutputError) as exc:
+        logger.error("Task %s research LLM error: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.RESEARCHING, TaskStatus.FAILED, "research_llm_error"
+        )
+    except Exception:  # noqa: BLE001 — never hang, never silently continue
+        logger.exception("Task %s researcher crashed", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.RESEARCHING, TaskStatus.FAILED, "research_error"
+        )
+    logger.info("Task %s -> IMPLEMENTING (research artifact persisted)", task.id)
+    return _cas_transition(
+        db, task.id, TaskStatus.RESEARCHING, TaskStatus.IMPLEMENTING, "artifact_persisted"
+    )

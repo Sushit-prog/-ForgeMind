@@ -19,7 +19,7 @@ from tests_e2e.conftest import spawn_worker, wait_for
 EXPECTED_STATUSES = [s.value for s in AUTO_PIPELINE][1:]
 
 
-def test_two_workers_same_task_no_double_processing(client, db_session) -> None:
+def test_two_workers_same_task_no_double_processing(client, db_session, source_repo) -> None:
     # Two workers, a widened transition window so races are actually possible.
     workers = [
         spawn_worker({"FORGEMIND_STEP_DELAY_MS": "150"}),
@@ -32,7 +32,8 @@ def test_two_workers_same_task_no_double_processing(client, db_session) -> None:
                 "/tasks",
                 json={
                     "objective": f"Task {i}",
-                    "repository_url": "https://github.com/org/repo.git",
+                    # A real clonable repo: RESEARCHING (Phase 6) needs one.
+                    "repository_url": "file:///" + str(source_repo).replace("\\", "/"),
                 },
             ).json()
             tasks.append(uuid.UUID(created["id"]))

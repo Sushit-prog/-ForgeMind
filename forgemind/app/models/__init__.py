@@ -17,6 +17,7 @@ from app.models.execution_event import ExecutionEvent
 from app.models.plan import Plan, PlanStep
 from app.models.policy import Policy
 from app.models.repository import Repository, Worktree
+from app.models.research_artifact import ResearchArtifact
 from app.models.task import Task, TaskStatus, TaskStep
 from app.models.tool_call import ToolCall, ToolCallStatus
 
@@ -30,6 +31,7 @@ __all__ = [
     "PlanStep",
     "Policy",
     "Repository",
+    "ResearchArtifact",
     "Task",
     "TaskStatus",
     "TaskStep",

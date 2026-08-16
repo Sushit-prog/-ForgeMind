@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(
         default=2, description="Bounded transient (timeout/5xx) retries per call."
     )
+    # Research agent (Phase 6): hard cap on tool calls per task before a
+    # forced synthesis — the budget-limiting pattern from Section 42.
+    max_research_tool_calls: int = Field(
+        default=10, description="Max tool calls per research run (env: MAX_RESEARCH_TOOL_CALLS)."
+    )
 
 
 @lru_cache

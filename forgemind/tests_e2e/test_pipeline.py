@@ -18,12 +18,16 @@ from app.runtime.state_machine import LEGAL_TRANSITIONS
 from app.runtime.task_lifecycle import AUTO_PIPELINE, USER_CANCELLED
 from tests_e2e.conftest import spawn_worker, wait_for
 
-VALID_PAYLOAD = {
-    "objective": "Fix the flaky test in auth",
-    "repository_url": "https://github.com/org/repo.git",
-}
-
 EXPECTED_STATUSES = [s.value for s in AUTO_PIPELINE]
+
+
+def valid_payload(source_repo) -> dict:
+    """A real clonable repo: RESEARCHING now runs the real agent, which
+    needs a real worktree (a fake github URL would fail at clone time)."""
+    return {
+        "objective": "Fix the flaky test in auth",
+        "repository_url": "file:///" + str(source_repo).replace("\\", "/"),
+    }
 
 
 def task_events(db, task_id: uuid.UUID) -> list[ExecutionEvent]:
@@ -45,10 +49,10 @@ def assert_full_trail(db, task_id: uuid.UUID) -> None:
         assert TaskStatus(e.to_status) in LEGAL_TRANSITIONS[TaskStatus(e.from_status)]
 
 
-def test_full_pipeline_worker_driven_to_completed(client, db_session) -> None:
+def test_full_pipeline_worker_driven_to_completed(client, db_session, source_repo) -> None:
     proc = spawn_worker()
     try:
-        created = client.post("/tasks", json=VALID_PAYLOAD).json()
+        created = client.post("/tasks", json=valid_payload(source_repo)).json()
         task_id = uuid.UUID(created["id"])
 
         def completed() -> bool:
@@ -61,9 +65,9 @@ def test_full_pipeline_worker_driven_to_completed(client, db_session) -> None:
         proc.wait(timeout=10)
 
 
-def test_cancelled_task_stays_failed_under_worker(client, db_session) -> None:
+def test_cancelled_task_stays_failed_under_worker(client, db_session, source_repo) -> None:
     """Cancel enqueues nothing; even a running worker must not resurrect it."""
-    created = client.post("/tasks", json=VALID_PAYLOAD).json()
+    created = client.post("/tasks", json=valid_payload(source_repo)).json()
     task_id = uuid.UUID(created["id"])
 
     resp = client.post(f"/tasks/{task_id}/cancel")
@@ -84,11 +88,11 @@ def test_cancelled_task_stays_failed_under_worker(client, db_session) -> None:
         proc.wait(timeout=10)
 
 
-def test_crash_after_commit_is_healed_by_restart(client, db_session) -> None:
+def test_crash_after_commit_is_healed_by_restart(client, db_session, source_repo) -> None:
     """Crash in the commit->re-enqueue window: last status persists, restart resumes."""
     proc = spawn_worker({"FORGEMIND_CRASH_AFTER_COMMIT": "1"})
     try:
-        created = client.post("/tasks", json=VALID_PAYLOAD).json()
+        created = client.post("/tasks", json=valid_payload(source_repo)).json()
         task_id = uuid.UUID(created["id"])
 
         # The worker commits CREATED->PLANNING, then dies before re-enqueuing.
@@ -121,11 +125,11 @@ def test_crash_after_commit_is_healed_by_restart(client, db_session) -> None:
         proc.wait(timeout=10)
 
 
-def test_kill_between_transitions_resumes_cleanly(client, db_session) -> None:
+def test_kill_between_transitions_resumes_cleanly(client, db_session, source_repo) -> None:
     """Killing the worker between two transitions: task at last persisted state."""
     proc = spawn_worker({"FORGEMIND_STEP_DELAY_MS": "8000"})
     try:
-        created = client.post("/tasks", json=VALID_PAYLOAD).json()
+        created = client.post("/tasks", json=valid_payload(source_repo)).json()
         task_id = uuid.UUID(created["id"])
 
         # Wait for the FIRST transition to commit; the worker is then sleeping

@@ -21,6 +21,13 @@ Current milestone scope:
   task objective into a schema-validated plan DAG, persists it, and only then does the worker
   move PLANNING → RESEARCHING. Malformed output retries exactly once; task text is wrapped as
   DATA (prompt-injection defense); the planner has zero tool capabilities.
+- **Phase 6 — Research Agent**: the first multi-turn tool-use agent. A bounded loop where the
+  LLM proposes `repository.*`/`git.*` tool calls, the Phase-3 pipeline executes them under the
+  researcher's fixed READ-ONLY capability set (`repo.read`, `git.read`, `github.read`), and the
+  loop ends with a schema-validated `ResearchArtifact` whose file claims are cross-checked
+  against what the loop actually observed. RESEARCHING → IMPLEMENTING fires only after the
+  artifact is persisted. Read-only is enforced structurally (a write proposal is DENIED and
+  audited, never "just tried"); file content and git output are DATA, not instructions.
 
 ## Quick start
 
@@ -64,19 +71,26 @@ curl localhost:8000/health               # {"status": "ok"}
 ## Tests
 
 ```bash
-pytest              # hermetic suite (SQLite, no services) — state machine, lifecycle, API
-pytest tests_e2e/   # end-to-end (needs `docker compose up -d --wait`) — real worker pipeline,
-                    # cancel, crash recovery (kill/restart), two-worker concurrency
+pytest              # hermetic suite (SQLite, no services) — state machine, lifecycle, API,
+                    # policy engine, path traversal, git runtime, planner, research agent
+pytest tests_e2e/   # end-to-end (needs Postgres + Redis up) — real worker pipeline, cancel,
+                    # crash recovery (kill/restart), two-worker concurrency, research loop
 ```
+
+Note: `tests_e2e/` spawns its OWN worker subprocesses on the same Postgres/Redis, so stop the
+compose worker first (`docker compose stop worker`) — an extra always-on worker races the test
+workers (both sweep the same tasks). This is a test-harness constraint, not a product issue.
 
 ## Layout
 
 ```
 app/
   agents/
-    base.py                 Agent ABC (capabilities are the structural boundary)
+    base.py                 Agent ABC + shared structured_output_with_retries
     planner/                PlanningAgent: prompt (data-not-instructions), Plan schema +
                             DAG validation, retry-once, persistence
+    researcher/             ResearchAgent: bounded tool-use loop (read-only), ResearchArtifact
+                            schema + grounding cross-check, forced synthesis on budget exhaustion
   api/routes/tasks.py       Task API: create/list/get/cancel/events
   capabilities/             Capability value objects + per-agent assignment (Section H)
   database/                 engine/session + Alembic migrations
@@ -97,12 +111,13 @@ app/
     file_access.py          worktree-scoped read/list/search — traversal-safe
   runtime/
     state_machine.py        Section-D legal-transition table — pure logic, no I/O
-    task_lifecycle.py       transitions + events + stub driver + advance_task_with_planner
+    task_lifecycle.py       transitions + events + stub driver + agent transitions
+                            (advance_task_with_agents) with compare-and-swap re-check
   schemas/                  Pydantic request/response schemas
   tools/                    Tool ABC + registry + example tools + repository.* / git.* tools
   worker/
     queue.py                arq Redis settings + pool + enqueue helper
-    jobs/advance_task.py    one job = one transition (PLANNING runs the real planner)
+    jobs/advance_task.py    one job = one transition (PLANNING/ RESEARCHING run the real agents)
     worker.py               arq entrypoint + startup sweep (crash recovery)
   config.py                 env-driven settings (secrets never hardcoded/logged)
   logging.py                logging setup with URL redaction
@@ -150,6 +165,29 @@ Example tools prove the paths: `example.echo` (executes), `example.read_file`
   and prove the injected payload can never become a persisted plan.
 - **Planner capabilities are structurally empty** — it cannot invoke any tool.
 
+## Research Agent (Phase 6)
+
+- **Bounded tool-use loop**: the LLM proposes ONE tool call per turn (`repository.search`,
+  `read_file`, `list_files`, `git.status`/`diff`/`log`); the pipeline executes it under the
+  researcher's fixed read-only capability set; results are fed back as `<observation>` DATA;
+  repeat up to `MAX_RESEARCH_TOOL_CALLS` (default 10). A `{"final": true}` response ends the
+  loop and the runtime asks for the `ResearchArtifact`.
+- **Read-only is structural**: the capability set is `repo.read`/`git.read`/`github.read` — a
+  write proposal (e.g. `git.commit`) is DENIED by the pipeline and audited, and the loop
+  survives (the denial becomes an observation).
+- **Grounding cross-check**: the artifact's `relevant_files`/`relevant_tests` must have been
+  observed during the loop (read/searched/listed). Fabricated claims are rejected once with a
+  correction prompt; if the retry still lies, the artifact is accepted WITH a loud
+  `artifact.files_unverified` audit entry (a wrong file in a hypothesis is recoverable
+  downstream; failing the whole task over it is not).
+- **Budget exhaustion**: an LLM that never says `final` is hard-stopped at the budget, audited
+  (`research.budget_exhausted`), and forced into synthesis — never an infinite loop.
+- **Prompt injection**: file contents and git output are untrusted DATA like the issue text;
+  an injection inside a file cannot fabricate grounding (the cross-check rejects it).
+- **Concurrency-safe worktree/clone**: two workers racing the same task (research commits
+  mid-transaction, releasing the row lock) are handled by compare-and-swap transitions and
+  idempotent clone/worktree creation — one transition per state, no spurious failures.
+
 ## Git/repository runtime (Phase 4)
 
 - **One clone per repo**, cached at `repositories.local_clone_path` (`--no-checkout`, so no
@@ -180,8 +218,10 @@ its last persisted status; the worker's startup sweep re-enqueues it from there.
 
 Tables (architecture doc section G, milestone scope): `tasks`, `plans` (incl.
 `raw_llm_output`), `plan_steps`, `task_steps`, `capabilities`, `policies`, `audit_logs`,
-`repositories` (incl. `local_clone_path`), `worktrees`, `execution_events`, `tool_calls`.
-Remaining Section-G tables arrive with the phases that use them (agents/eval).
+`repositories` (incl. `local_clone_path`), `worktrees`, `execution_events`, `tool_calls`,
+`research_artifacts`. Remaining Section-G tables arrive with the phases that use them
+(agents/eval). Tasks default to a bounded replan budget (`max_replans=3`) — Section D's
+"budget exhausted → ESCALATED" is enforced even when the API client sets no budget.
 
 ## Security posture
 

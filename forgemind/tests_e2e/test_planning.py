@@ -13,16 +13,19 @@ from sqlalchemy import select
 from app.models import ExecutionEvent, Plan, PlanStep
 from tests_e2e.conftest import spawn_worker, wait_for
 
-VALID_PAYLOAD = {
-    "objective": "Fix the login bug",
-    "repository_url": "https://github.com/org/repo.git",
-}
+def valid_payload(source_repo) -> dict:
+    """A real clonable repo: RESEARCHING now runs the real agent (Phase 6),
+    which needs a real worktree — a fake github URL would fail at clone."""
+    return {
+        "objective": "Fix the login bug",
+        "repository_url": "file:///" + str(source_repo).replace("\\", "/"),
+    }
 
 
-def test_worker_persists_real_plan(client, db_session) -> None:
+def test_worker_persists_real_plan(client, db_session, source_repo) -> None:
     proc = spawn_worker()
     try:
-        created = client.post("/tasks", json=VALID_PAYLOAD).json()
+        created = client.post("/tasks", json=valid_payload(source_repo)).json()
         task_id = uuid.UUID(created["id"])
 
         def completed() -> bool:
@@ -54,11 +57,11 @@ def test_worker_persists_real_plan(client, db_session) -> None:
         proc.wait(timeout=10)
 
 
-def test_worker_retries_flaky_planner_output(client, db_session) -> None:
+def test_worker_retries_flaky_planner_output(client, db_session, source_repo) -> None:
     """Malformed first attempt, valid second — the worker's retry heals it."""
     proc = spawn_worker({"FORGEMIND_MOCK_LLM_FLAKY": "1"})
     try:
-        created = client.post("/tasks", json=VALID_PAYLOAD).json()
+        created = client.post("/tasks", json=valid_payload(source_repo)).json()
         task_id = uuid.UUID(created["id"])
 
         def completed() -> bool:

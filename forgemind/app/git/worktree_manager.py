@@ -131,6 +131,52 @@ class WorktreeManager:
         self.db.commit()
         logger.info("Worktree %s discarded", worktree_id)
 
+    def get_or_create_for_task(self, task) -> Worktree:
+        """The task's active worktree, creating it if none exists yet.
+
+        Agents (research first) call this to obtain their isolated
+        workspace. Creating the worktree is runtime infrastructure, not a
+        tool call — the capability boundary applies to tool invocation.
+
+        Concurrency-safe: two workers can legitimately run the same agent
+        step (research commits mid-transaction, releasing the row lock, so
+        a second worker can enter ``_run_researching`` for the same task).
+        The create race — both see no worktree row, both ``git worktree
+        add -b agent/task-...`` — is resolved by retrying once and RELOADING
+        the winner's row instead of failing the whole task (Section D: no
+        double-processing, no spurious failures).
+        """
+        wt = self._active_for(task.id)
+        if wt is not None:
+            return wt
+        repository = self.db.get(Repository, task.repository_id)
+        if repository is None:
+            raise WorktreeNotFoundError(
+                detail=f"no repository row for task {task.id}"
+            )
+        for _ in range(2):
+            try:
+                return self.create(task.id, repository)
+            except (DirtyWorktreeError, GitOperationError):
+                # A concurrent creator won (branch/worktree already exists,
+                # or the row appeared mid-flight) — roll back our pending
+                # session state and reuse theirs.
+                self.db.rollback()
+                wt = self._active_for(task.id)
+                if wt is not None:
+                    return wt
+        raise GitOperationError(
+            f"failed to create worktree for task {task.id} "
+            "(concurrent create race not resolved)"
+        )
+
+    def _active_for(self, task_id: uuid.UUID) -> Worktree | None:
+        return self.db.scalar(
+            select(Worktree).where(
+                Worktree.task_id == task_id, Worktree.status == "active"
+            )
+        )
+
     def path_for(self, worktree_id: uuid.UUID) -> Path:
         """Resolve a worktree id to its on-disk path — the security seam.
 

@@ -53,10 +53,13 @@ class Task(Base):
     )
 
     # Budget — from the domain model: max_cost/max_tokens/max_runtime/max_replans.
+    # max_replans defaults to a bounded value (Section D: replan-budget
+    # exhaustion -> ESCALATED, never an unbounded failure loop). The column
+    # stays nullable so per-task overrides can raise or disable the cap.
     max_cost: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
     max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_runtime: Mapped[int | None] = mapped_column(Integer, nullable=True)  # seconds
-    max_replans: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_replans: Mapped[int | None] = mapped_column(Integer, nullable=True, default=3)
     replan_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     created_at: Mapped[datetime] = mapped_column(

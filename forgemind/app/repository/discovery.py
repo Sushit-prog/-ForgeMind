@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -41,18 +42,38 @@ class RepositoryDiscovery:
 
         clone_path = self.cache_dir / "clones" / str(repository.id)
         if clone_path.exists():
-            shutil.rmtree(clone_path)  # stale leftover — re-clone cleanly
+            # A leftover path may be an IN-PROGRESS clone by a concurrent
+            # worker (git creates the destination directory immediately).
+            # Deleting it would corrupt the winner's clone — so wait briefly
+            # for it to become a valid git dir first; only a still-invalid
+            # path is treated as a true stale leftover and re-cloned.
+            for _ in range(30):  # ~3s max — a local clone takes <1s
+                if run_git_ok(clone_path, "rev-parse", "--git-dir"):
+                    repository.local_clone_path = str(clone_path)
+                    logger.info("Reusing concurrent clone %s", clone_path)
+                    return clone_path
+                if not clone_path.exists():
+                    break  # the concurrent worker cleaned it up
+                time.sleep(0.1)
+            shutil.rmtree(clone_path, ignore_errors=True)  # truly stale
         clone_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Argument list only — the URL is a single argument, never shell.
         try:
             run_git(self.cache_dir, "clone", "--no-checkout", repository.url, str(clone_path))
         except GitOperationError as exc:
-            if clone_path.exists():
-                shutil.rmtree(clone_path, ignore_errors=True)
-            raise GitOperationError(
-                f"failed to clone {repository.url}: {exc}"
-            ) from exc
+            # A concurrent worker may have won the clone race: if the path
+            # now exists as a valid git dir, reuse it instead of failing
+            # (research can legitimately run twice on one task — Section D
+            # concurrency). Anything else is a real clone failure.
+            if clone_path.exists() and run_git_ok(clone_path, "rev-parse", "--git-dir"):
+                logger.info("Clone race for %s — reusing concurrent clone", repository.url)
+            else:
+                if clone_path.exists():
+                    shutil.rmtree(clone_path, ignore_errors=True)
+                raise GitOperationError(
+                    f"failed to clone {repository.url}: {exc}"
+                ) from exc
 
         repository.local_clone_path = str(clone_path)
         logger.info("Cloned repository %s -> %s", repository.url, clone_path)

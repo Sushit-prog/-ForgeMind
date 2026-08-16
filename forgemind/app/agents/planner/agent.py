@@ -3,7 +3,7 @@
 ``PlanningAgent.run`` is the first real LLM-driven component: task
 objective in -> schema-validated Plan out -> persisted -> returned. It
 drives the state machine's PLANNING -> RESEARCHING transition (see
-``task_lifecycle.advance_task_with_planner``).
+``task_lifecycle.advance_task_with_agents``).
 
 Retry policy (the seam the milestone calls out):
 
@@ -25,7 +25,7 @@ import logging
 import os
 from typing import ClassVar
 
-from app.agents.base import Agent
+from app.agents.base import Agent, structured_output_with_retries
 from app.agents.planner.prompt import (
     build_correction_messages,
     build_planning_messages,
@@ -33,10 +33,7 @@ from app.agents.planner.prompt import (
 from app.agents.planner.schema import Plan, PlanValidationError, validate_plan_dag
 from app.config import get_settings
 from app.execution.tool_pipeline import redact_sensitive
-from app.llm.config import get_model_for_role
 from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
-from app.llm.mock import DEFAULT_PLAN_RESPONSE, MALFORMED_RESPONSE, StubLLMProvider
-from app.llm.openrouter import OpenRouterProvider, is_transient_error
 from app.llm.provider import LLMProvider, Message
 from app.models import Plan as PlanRow
 from app.models import PlanStep as PlanStepRow
@@ -138,28 +135,15 @@ class PlanningAgent(Agent):
     # -- internals -----------------------------------------------------------
 
     async def _call_with_timeout_retries(self, messages: list[Message]) -> Plan:
-        """One structured_output call, with bounded transient retries.
-
-        Only transient errors (timeout, 429/5xx) retry here; malformed
-        output propagates immediately so the correction retry can fire.
-        """
-        attempt = 0
-        while True:
-            try:
-                result = await self.provider.structured_output(messages, Plan)
-                return result  # type: ignore[return-value]
-            except LLMTimeoutError:
-                if attempt >= self.timeout_retries:
-                    raise
-                logger.warning("planner: LLM timeout, retry %d/%d", attempt + 1, self.timeout_retries)
-            except Exception as exc:  # noqa: BLE001
-                if not is_transient_error(exc):
-                    raise
-                if attempt >= self.timeout_retries:
-                    raise
-                logger.warning("planner: transient LLM error (%s), retry %d/%d", exc, attempt + 1, self.timeout_retries)
-            await asyncio.sleep(self.backoff_base * (2**attempt))
-            attempt += 1
+        """One Plan call with bounded transient retries (shared helper)."""
+        result = await structured_output_with_retries(
+            self.provider,
+            messages,
+            Plan,
+            timeout_retries=self.timeout_retries,
+            backoff_base_seconds=self.backoff_base,
+        )
+        return result  # type: ignore[return-value]
 
     def _persist_success(self, ctx: ExecutionContext, task: Task, plan: Plan) -> None:
         if ctx.db is None:
@@ -221,30 +205,33 @@ class PlanningAgent(Agent):
         logger.error("Planner failed for task %s (%s); raw output preserved", task.id, reason)
 
 
-def build_planner() -> PlanningAgent:
-    """Construct the planner from settings/env — used by the worker.
+def build_provider():
+    """Construct the LLM provider from settings/env (shared by all agents).
 
     Order: real OpenRouter when a key is configured; else the stub
     provider when ``FORGEMIND_MOCK_LLM=1`` (tests / key-less dev); else a
     clear ``PlannerConfigError``.
     """
+    from app.llm.mock import StubLLMProvider, default_by_schema
+    from app.llm.openrouter import OpenRouterProvider
+
     settings = get_settings()
     if settings.openrouter_api_key:
-        return PlanningAgent(
-            OpenRouterProvider(
-                api_key=settings.openrouter_api_key,
-                base_url=settings.openrouter_base_url,
-                model=get_model_for_role("planner"),
-                timeout_seconds=settings.llm_timeout_seconds,
-            )
+        return OpenRouterProvider(
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+            model=get_model_for_role("planner"),
+            timeout_seconds=settings.llm_timeout_seconds,
         )
     if os.environ.get("FORGEMIND_MOCK_LLM") == "1":
         flaky = os.environ.get("FORGEMIND_MOCK_LLM_FLAKY") == "1"
-        responses = (
-            [MALFORMED_RESPONSE, DEFAULT_PLAN_RESPONSE] if flaky else [DEFAULT_PLAN_RESPONSE]
-        )
-        return PlanningAgent(StubLLMProvider(responses=responses))
+        return StubLLMProvider(by_schema=default_by_schema(flaky_planner=flaky))
     raise PlannerConfigError(
         "no LLM provider configured: set OPENROUTER_API_KEY (and LLM_MODEL_PLANNER) "
         "or FORGEMIND_MOCK_LLM=1 for key-less development"
     )
+
+
+def build_planner() -> PlanningAgent:
+    """Construct the planner from settings/env — used by the worker."""
+    return PlanningAgent(build_provider())
