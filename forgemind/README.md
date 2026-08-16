@@ -10,7 +10,12 @@ Current milestone scope:
   the queue.
 - **Phase 3 — tool runtime**: typed tool registry, capability model, deterministic policy engine,
   and the full tool pipeline (validate → capability → policy → execute → audit) with three
-  harmless example tools. No agents and no real side-effecting tools yet.
+  harmless example tools.
+- **Phase 4 — git/repository runtime**: real filesystem access. Repository discovery (clone-once
+  cache), per-task git worktrees (never touching `main`), worktree-scoped file read/list/search
+  with airtight path-traversal defense, and `repository.*` / `git.*` tools wired through the
+  pipeline (capability-gated, audited, fixed commit identity). No `git.push`, no `shell.*`, no
+  agents, no LLM calls yet.
 
 ## Quick start
 
@@ -67,13 +72,20 @@ app/
   capabilities/             Capability value objects + per-agent assignment (Section H)
   database/                 engine/session + Alembic migrations
   execution/tool_pipeline.py  validate -> capability -> policy -> execute -> audit
+  git/
+    runner.py               git subprocess runner (arg lists only, fixed identity, no prompts)
+    operations.py           status/diff/log/create_branch/commit on a worktree
+    worktree_manager.py     per-task worktrees (create/discard/path_for) — the only branch creator
   models/                   SQLAlchemy models (Section-G schema) + ExecutionEvent + ToolCall
   policies/                 deterministic PolicyEngine + risk-default & explicit-deny rules
+  repository/
+    discovery.py            clone-once cache + default-branch/base-commit resolution
+    file_access.py          worktree-scoped read/list/search — traversal-safe
   runtime/
     state_machine.py        Section-D legal-transition table — pure logic, no I/O
     task_lifecycle.py       atomic transitions + execution_events + stub pipeline driver
   schemas/                  Pydantic request/response schemas
-  tools/                    Tool ABC + registry + example tools (echo / read_file / denied)
+  tools/                    Tool ABC + registry + example tools + repository.* / git.* tools
   worker/
     queue.py                arq Redis settings + pool + enqueue helper
     jobs/advance_task.py    one job = one transition (FOR UPDATE, re-enqueue)
@@ -81,7 +93,7 @@ app/
   config.py                 env-driven settings (secrets never hardcoded/logged)
   logging.py                logging setup with URL redaction
   main.py                   FastAPI app + /health + fail-fast DB check
-tests/                      hermetic suite (SQLite)
+tests/                      hermetic suite (SQLite + real local git repos)
 tests_e2e/                  end-to-end suite (Postgres + Redis + worker subprocesses)
 ```
 
@@ -104,8 +116,24 @@ validate input -> capability check -> policy check -> execute -> audit
 
 Example tools prove the paths: `example.echo` (executes), `example.read_file`
 (denied without `repo.read`), `example.denied` (denied by explicit policy).
-Real tools (`repository.*`, `git.*`, `shell.*`, `github.*`) register through
-the same `ToolRegistry` in later phases.
+
+## Git/repository runtime (Phase 4)
+
+- **One clone per repo**, cached at `repositories.local_clone_path` (`--no-checkout`, so no
+  default-branch working tree exists on disk at all). Per-task worktrees via
+  `git worktree add -b agent/task-{id}` from the default-branch HEAD — the only place a branch
+  is created; nothing ever commits to or checks out `main`.
+- **Server-side path resolution**: every file/git tool takes a `worktree_id`; paths resolve
+  against the worktree root and anything escaping it (`../`, absolute, symlink escape) raises
+  `PathTraversalError` (a `SecurityError`) before any read. Traversal is logged as a
+  security-relevant event and surfaces as a FAILED tool call.
+- **Commits** stage all changes (`git add -A`) and refuse empty trees, with a fixed identity
+  (`ForgeMind Agent <agent@forgemind.local>`) — agent input can never set authorship.
+- **Discard** (`git worktree remove --force` + branch delete) enables Section J's
+  "discard and recreate from base_commit" recovery path — recreated worktrees start byte-
+  identical to the original.
+- `git.*`/`repository.*` tools are capability-gated (`repo.read`, `git.read`, `git.write`),
+  risk-tiered, and fully audited by the Phase 3 pipeline.
 
 ## State machine (architecture doc section D)
 
@@ -118,9 +146,9 @@ its last persisted status; the worker's startup sweep re-enqueues it from there.
 ## Schema
 
 Tables (architecture doc section G, milestone scope): `tasks`, `plans`, `plan_steps`,
-`task_steps`, `capabilities`, `policies`, `audit_logs`, `repositories`, `worktrees`,
-`execution_events`, `tool_calls`. Remaining Section-G tables arrive with the phases that
-use them (agents/eval).
+`task_steps`, `capabilities`, `policies`, `audit_logs`, `repositories` (incl.
+`local_clone_path`), `worktrees`, `execution_events`, `tool_calls`. Remaining Section-G tables
+arrive with the phases that use them (agents/eval).
 
 ## Security posture
 

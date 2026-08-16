@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     # startup sweep would pick them up if a queue were present.
     queue_enabled: bool = True
 
+    # Where repository clones and per-task worktrees live (Phase 4). Paths
+    # are resolved relative to the process CWD unless absolute.
+    repo_cache_dir: str = Field(
+        default=".forgemind/repos",
+        description="Directory for cached clones and per-task worktrees.",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

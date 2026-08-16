@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.orm import Session
 
 RiskLevel = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
@@ -22,13 +23,18 @@ class ExecutionContext(BaseModel):
 
     All fields optional — a tool call outside a task (e.g. registry tests)
     still audits correctly; the row just carries nulls for what's absent.
+
+    ``db`` is the persistence session tools use to resolve server-side
+    state (e.g. ``worktree_id`` -> path). Agent runtimes populate it;
+    tools that need it raise a clear error if it's absent.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
     task_id: uuid.UUID | None = None
     step_id: uuid.UUID | None = None
     agent_type: str | None = None
+    db: Session | None = None
 
 
 class Tool(ABC):

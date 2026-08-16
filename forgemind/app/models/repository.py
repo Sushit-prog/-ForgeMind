@@ -22,6 +22,9 @@ class Repository(Base):
     url: Mapped[str] = mapped_column(String(2048), nullable=False, unique=True)
     default_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     local_path: Mapped[str | None] = mapped_column(Text, nullable=True)  # worktree root
+    # Cached clone location, set once by RepositoryDiscovery (Phase 4) — never
+    # re-cloned per task; worktrees are added from this clone.
+    local_clone_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     languages: Mapped[dict | None] = mapped_column(JsonType, nullable=True)
     test_command: Mapped[str | None] = mapped_column(Text, nullable=True)
     lint_command: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -113,9 +113,9 @@ class ToolPipeline:
 
     def _default_registry(self) -> ToolRegistry:
         if self.registry is None:
-            from app.tools.examples import build_default_registry
+            from app.tools import build_runtime_registry
 
-            self.registry = build_default_registry()
+            self.registry = build_runtime_registry()
         return self.registry
 
     def _default_policy_engine(self) -> PolicyEngine:
@@ -164,7 +164,8 @@ class ToolPipeline:
             step_id=ctx.step_id,
             agent_type=ctx.agent_type,
             tool_name=tool.name,
-            input=redact_sensitive(validated.model_dump()),
+            # mode="json": UUIDs/datetimes become JSON-safe scalars for the row.
+            input=redact_sensitive(validated.model_dump(mode="json")),
             status=ToolCallStatus.ALLOWED.value,
             risk=tool.risk,
         )
@@ -185,14 +186,14 @@ class ToolPipeline:
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         row.status = ToolCallStatus.EXECUTED.value
-        row.output = redact_sensitive(output.model_dump())
+        row.output = redact_sensitive(output.model_dump(mode="json"))
         row.latency_ms = latency_ms
         self.db.commit()
         logger.info("Tool %s executed in %dms", tool_name, latency_ms)
         return ToolResult(
             tool_name=tool_name,
             status="EXECUTED",
-            output=output.model_dump(),
+            output=output.model_dump(mode="json"),
             latency_ms=latency_ms,
         )
 
@@ -210,7 +211,7 @@ class ToolPipeline:
                 step_id=ctx.step_id,
                 agent_type=ctx.agent_type,
                 tool_name=tool.name,
-                input=redact_sensitive(validated.model_dump()),
+                input=redact_sensitive(validated.model_dump(mode="json")),
                 status=ToolCallStatus.DENIED.value,
                 denial_reason=reason,
                 risk=tool.risk,
@@ -225,6 +226,7 @@ def make_execution_context(
     task_id: uuid.UUID | None = None,
     step_id: uuid.UUID | None = None,
     agent_type: str | None = None,
+    db=None,
 ) -> ExecutionContext:
     """Convenience builder for tests and callers."""
-    return ExecutionContext(task_id=task_id, step_id=step_id, agent_type=agent_type)
+    return ExecutionContext(task_id=task_id, step_id=step_id, agent_type=agent_type, db=db)

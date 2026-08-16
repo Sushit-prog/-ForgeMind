@@ -16,6 +16,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ os.environ["ENVIRONMENT"] = "test"
 os.environ["LOG_LEVEL"] = "WARNING"
 os.environ["QUEUE_ENABLED"] = "true"
 os.environ["WORKER_SWEEP_ENABLED"] = "true"
+os.environ["REPO_CACHE_DIR"] = tempfile.mkdtemp(prefix="forgemind-e2e-cache-")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -89,13 +91,45 @@ def db_session():
         session.close()
 
 
+@pytest.fixture()
+def source_repo(tmp_path):
+    """A real throwaway git repo (Phase 4 git-runtime tests)."""
+    from app.git.runner import run_git
+
+    repo = tmp_path / "source"
+    repo.mkdir()
+    run_git(repo, "init", "-b", "main")
+    (repo / "README.md").write_text("# Fixture Repo\n")
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("VALUE = 1\n")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-m", "initial commit")
+    return repo
+
+
+@pytest.fixture()
+def repo_task(db_session, source_repo):
+    """A Repository + Task row pointing at ``source_repo`` (Postgres)."""
+    from app.models import Repository, Task
+
+    repo = Repository(url=str(source_repo), default_branch="main")
+    db_session.add(repo)
+    db_session.flush()
+    task = Task(objective="fix a bug", repository_id=repo.id)
+    db_session.add(task)
+    db_session.commit()
+    db_session.refresh(repo)
+    db_session.refresh(task)
+    return repo, task
+
+
 def _truncate_all() -> None:
     """Wipe the task-domain tables (CASCADE handles all FKs)."""
     with engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE repositories, tasks, execution_events, audit_logs "
-                "RESTART IDENTITY CASCADE"
+                "TRUNCATE repositories, tasks, execution_events, audit_logs, "
+                "tool_calls, worktrees RESTART IDENTITY CASCADE"
             )
         )
 
