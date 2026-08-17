@@ -72,7 +72,7 @@ def build_developer_messages(
     and the debugger's fix instruction (when re-implementing after a failed
     test run) are all DATA."""
     fix_section = (
-        f"\nFIX INSTRUCTION FROM THE DEBUGGER (DATA):\n{fix_instruction}\n"
+        f"\nFIX INSTRUCTION (DATA):\n{fix_instruction}\n"
         if fix_instruction
         else ""
     )

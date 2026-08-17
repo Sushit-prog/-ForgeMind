@@ -62,9 +62,25 @@ class GitOperations:
             clean=not (staged or unstaged or untracked),
         )
 
-    def diff(self, staged: bool = False) -> str:
+    def diff(self, staged: bool = False, commit: str | None = None) -> str:
+        """Diff the working tree (vs HEAD/index), or a specific commit.
+
+        ``commit`` is the Phase 9 Reviewer/Security use case: the developer
+        already committed, so the working tree is clean — reviewing requires
+        the diff OF that commit (``git show <sha>``, no commit message), not
+        the tree diff. The sha is a single argument, never a shell string.
+        """
+        if commit is not None:
+            return run_git(self.path, "show", "--format=", commit).stdout
         args = ["diff"] + (["--cached"] if staged else [])
         return run_git(self.path, *args).stdout
+
+    def head_sha(self) -> str:
+        """The current HEAD of the worktree branch (Phase 9 VERIFICATION)."""
+        sha = run_git(self.path, "rev-parse", "HEAD").stdout.strip()
+        if not sha:
+            raise GitOperationError("worktree has no HEAD")
+        return sha
 
     def log(self, limit: int = 20) -> list[CommitInfo]:
         proc = run_git(

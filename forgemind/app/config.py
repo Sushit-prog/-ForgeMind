@@ -103,6 +103,21 @@ class Settings(BaseSettings):
     test_timeout_seconds: float = Field(
         default=300.0, description="Timeout for the test subprocess (env: TEST_TIMEOUT_SECONDS)."
     )
+    # Reviewer + Security agents (Phase 9): hard caps on their read-only
+    # investigation tool calls before a forced verdict. Models per role env
+    # vars (LLM_MODEL_REVIEWER, LLM_MODEL_SECURITY).
+    max_reviewer_tool_calls: int = Field(
+        default=10, description="Max tool calls per reviewer run (env: MAX_REVIEWER_TOOL_CALLS)."
+    )
+    max_security_tool_calls: int = Field(
+        default=10, description="Max tool calls per security run (env: MAX_SECURITY_TOOL_CALLS)."
+    )
+    llm_model_reviewer: str | None = Field(
+        default=None, description="Model for the reviewer agent (env: LLM_MODEL_REVIEWER)."
+    )
+    llm_model_security: str | None = Field(
+        default=None, description="Model for the security agent (env: LLM_MODEL_SECURITY)."
+    )
 
 
 @lru_cache

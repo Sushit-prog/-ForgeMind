@@ -90,10 +90,12 @@ def test_no_planner_fails_task_cleanly(db_session, repo_task) -> None:
 
 
 def test_non_agent_states_use_stub_and_never_call_planner(db_session, repo_task) -> None:
-    """States outside the agent set (Phase 8: TESTING/DEBUGGING are REAL now) are
-    still stub-driven: REVIEWING -> SECURITY_REVIEW never invokes the planner."""
+    """States outside the agent set (Phase 9: PLANNING/RESEARCHING/IMPLEMENTING/
+    TESTING/DEBUGGING/REVIEWING/SECURITY_REVIEW/VERIFICATION are ALL real now)
+    are still stub-driven: PR_CREATION -> AWAITING_APPROVAL never invokes the
+    planner."""
     repo, task = repo_task
-    # Advance past the agent states to REVIEWING (bypassing their agent
+    # Advance past every agent state to PR_CREATION (bypassing their agent
     # semantics — this test only proves the stub fallthrough for the states
     # that are STILL stubs).
     for target in (
@@ -102,6 +104,9 @@ def test_non_agent_states_use_stub_and_never_call_planner(db_session, repo_task)
         TaskStatus.IMPLEMENTING,
         TaskStatus.TESTING,
         TaskStatus.REVIEWING,
+        TaskStatus.SECURITY_REVIEW,
+        TaskStatus.VERIFICATION,
+        TaskStatus.PR_CREATION,
     ):
         transition_task(db_session, task, target)
     db_session.commit()
@@ -110,7 +115,7 @@ def test_non_agent_states_use_stub_and_never_call_planner(db_session, repo_task)
     planner = PlanningAgent(provider)
     new_status = run(advance_task_with_agents(db_session, task.id, planner=planner))
 
-    assert new_status is TaskStatus.SECURITY_REVIEW  # stub REVIEWING -> SECURITY_REVIEW
+    assert new_status is TaskStatus.AWAITING_APPROVAL  # stub PR_CREATION -> AWAITING_APPROVAL
     assert provider.structured_calls == []  # planner never invoked
     assert not db_session.scalars(select(Plan)).all()  # no plan persisted
 

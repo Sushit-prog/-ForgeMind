@@ -15,6 +15,8 @@ from app.config import get_settings
 _ROLE_MODEL_FIELDS = {
     "planner": "llm_model_planner",
     "debugger": "llm_model_debugger",
+    "reviewer": "llm_model_reviewer",
+    "security": "llm_model_security",
 }
 
 

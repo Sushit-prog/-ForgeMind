@@ -192,26 +192,37 @@ async def advance_task_with_agents(
     developer=None,
     tester=None,
     debugger=None,
+    reviewer=None,
+    security=None,
 ) -> TaskStatus | None:
-    """Worker unit of work (Phases 5-8): the real states run the real agents.
+    """Worker unit of work (Phases 5-9): the real states run the real agents.
 
     - PLANNING -> ``planner``; RESEARCHING -> ``researcher``; IMPLEMENTING
       -> ``developer`` (real commit + grounded summary); TESTING -> the
       deterministic ``tester`` (real subprocess run of the configured test
       command, Section 41: no LLM judgment); DEBUGGING -> ``debugger``
-      (read-only investigation + classification, with the flakiness re-run).
-      Each persists its artifact and the transition fires only after
-      persistence. On failure the task goes FAILED (never ESCALATED —
-      reserved for replan-budget exhaustion), with the reason on the event.
+      (read-only investigation + classification, with the flakiness re-run);
+      REVIEWING -> ``reviewer`` (diff + test result only — independent of
+      the developer's summary); SECURITY_REVIEW -> ``security`` (diff only,
+      blind to the Reviewer's verdict); VERIFICATION -> plain code (Phase 9
+      staleness check, no LLM at all). Each persists its artifact and the
+      transition fires only after persistence. On failure the task goes
+      FAILED (never ESCALATED — reserved for replan-budget exhaustion),
+      with the reason on the event.
     - TESTING branches for real: passed -> REVIEWING; failed/error ->
       DEBUGGING. DEBUGGING branches for real: flaky -> REVIEWING;
-      unfixable -> FAILED with the category; fixable -> IMPLEMENTING with
-      replan_count+1 (checked against max_replans — exhausted -> ESCALATED).
+      unfixable -> FAILED with the category; fixable -> IMPLEMENTING.
+      REVIEWING branches for real: APPROVE -> SECURITY_REVIEW;
+      REQUEST_CHANGES/REJECT -> IMPLEMENTING. SECURITY_REVIEW branches:
+      PASS -> VERIFICATION; FAIL -> IMPLEMENTING. VERIFICATION: the
+      reviewed commit must still be worktree HEAD and the last test run
+      must still be passed — otherwise back to TESTING (stale review). All
+      replans draw from the ONE shared max_replans budget at the transition
+      (exhausted -> ESCALATED).
     - every other state: identical to the stub ``advance_task_once``.
 
-    ``planner``/``researcher``/``developer``/``tester``/``debugger`` may be
-    None (no provider configured) — the task then fails cleanly instead of
-    hanging.
+    Any agent may be None (no provider configured) — the task then fails
+    cleanly instead of hanging.
     """
     task = db.execute(
         select(Task).where(Task.id == task_id).with_for_update()
@@ -231,7 +242,118 @@ async def advance_task_with_agents(
         return await _run_testing(db, task, tester)
     if current is TaskStatus.DEBUGGING:
         return await _run_debugging(db, task, debugger)
+    if current is TaskStatus.REVIEWING:
+        return await _run_reviewing(db, task, reviewer)
+    if current is TaskStatus.SECURITY_REVIEW:
+        return await _run_security_review(db, task, security)
+    if current is TaskStatus.VERIFICATION:
+        return await _run_verification(db, task)
     return advance_task_once(db, task_id)
+
+
+def _latest_fix_instruction(db: Session, task_id: uuid.UUID) -> str | None:
+    """The most recent fix instruction from ANY replan source (Phase 9).
+
+    Debugger classifications, Reviewer verdicts, and Security findings all
+    route back to IMPLEMENTING; the developer must receive the LATEST one,
+    clearly labeled with its source — never a merged/ambiguous instruction
+    (e.g. Reviewer approved but Security then failed: the developer must
+    see that it is Security's finding, not a mix of both). One shared replan
+    budget (``max_replans``) governs all three sources (Section 42): the
+    budget is counted on the task row, not per source.
+    """
+    from app.models import FailureClassification as ClassificationRow
+    from app.models import ReviewResult as ReviewRow
+    from app.models import SecurityResult as SecurityRow
+
+    candidates: list[tuple] = []  # (created_at, source, text)
+    classification = db.scalar(
+        select(ClassificationRow).where(ClassificationRow.task_id == task_id)
+        .order_by(ClassificationRow.created_at.desc(), ClassificationRow.id.desc())
+        .limit(1)
+    )
+    if classification is not None and classification.fix_instruction:
+        candidates.append(
+            (classification.created_at, "DEBUGGER", classification.fix_instruction)
+        )
+    review = db.scalar(
+        select(ReviewRow).where(ReviewRow.task_id == task_id)
+        .order_by(ReviewRow.created_at.desc(), ReviewRow.id.desc())
+        .limit(1)
+    )
+    if review is not None and review.decision != "APPROVE" and review.issues:
+        text = "; ".join(
+            f"{i.get('severity', 'medium')}: {i.get('description', '')} "
+            f"({i.get('file', '?')}:{i.get('line', '?')})"
+            for i in review.issues
+        )
+        candidates.append((review.created_at, f"REVIEWER {review.decision}", text))
+    security = db.scalar(
+        select(SecurityRow).where(SecurityRow.task_id == task_id)
+        .order_by(SecurityRow.created_at.desc(), SecurityRow.id.desc())
+        .limit(1)
+    )
+    if security is not None and security.decision == "FAIL" and security.findings:
+        text = "; ".join(
+            f"{f.get('category', 'OTHER')}: {f.get('description', '')} "
+            f"({f.get('file', '?')}:{f.get('line', '?')})"
+            for f in security.findings
+        )
+        candidates.append((security.created_at, "SECURITY", text))
+    if not candidates:
+        return None
+    _, source, text = max(candidates, key=lambda c: c[0])
+    return f"[{source}] {text}"
+
+
+def _replan_to_implementing(
+    db: Session,
+    task_id: uuid.UUID,
+    *,
+    expected: TaskStatus,
+    reason: str,
+) -> TaskStatus | None:
+    """The ONE shared replan path (Phase 8/9): lock the task, enforce the
+    shared replan budget at the transition, increment ``replan_count``, and
+    route to IMPLEMENTING — or ESCALATED when the budget is exhausted.
+
+    Used by DEBUGGING (debugger_replan), REVIEWING (review_requested_changes
+    / review_rejected), and SECURITY_REVIEW (security_failed). The developer
+    never sees the budget; the gate is this transition. The expected-status
+    check (populate_existing under the lock) makes concurrent workers skip
+    instead of double-replanning.
+    """
+    locked = db.execute(
+        select(Task)
+        .where(Task.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if locked is None:
+        return None
+    if TaskStatus(locked.status) is not expected:
+        logger.info(
+            "Task %s already at %s (expected %s) — skipping %s replan",
+            task_id, locked.status, expected.value, reason,
+        )
+        return TaskStatus(locked.status)
+    if locked.max_replans is not None and locked.replan_count >= locked.max_replans:
+        logger.warning(
+            "Task %s replan budget exhausted (%d >= %d) — ESCALATED",
+            task_id, locked.replan_count, locked.max_replans,
+        )
+        transition_task(
+            db, locked, TaskStatus.ESCALATED, reason="replan_budget_exhausted"
+        )
+        db.commit()
+        return TaskStatus.ESCALATED
+    locked.replan_count += 1
+    transition_task(db, locked, TaskStatus.IMPLEMENTING, reason=reason)
+    db.commit()
+    logger.info(
+        "Task %s -> IMPLEMENTING (%s replan #%d)", task_id, reason, locked.replan_count
+    )
+    return TaskStatus.IMPLEMENTING
 
 
 def _cas_transition(
@@ -384,7 +506,6 @@ async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
 
     from app.agents.developer.agent import DeveloperError
     from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
-    from app.models import FailureClassification as ClassificationRow
     from app.models import Plan as PlanRow
     from app.models import PlanStep as PlanStepRow
     from app.models import ResearchArtifact as ArtifactRow
@@ -418,16 +539,12 @@ async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
             db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "no_research_artifact"
         )
 
-    # A replan after debugging carries the Debugger's concrete fix instruction
-    # (Phase 8) — the developer receives it as DATA for its next run. The
-    # latest classification is the one that routed us back to IMPLEMENTING.
-    fix_instruction = None
-    classification = db.scalar(
-        select(ClassificationRow).where(ClassificationRow.task_id == task.id)
-        .order_by(ClassificationRow.created_at.desc()).limit(1)
-    )
-    if classification is not None and classification.fix_instruction:
-        fix_instruction = classification.fix_instruction
+    # A replan after debugging/review/security carries that source's CONCRETE
+    # fix instruction (Phase 8/9) — the developer receives it as DATA for its
+    # next run, labeled with which gate rejected it (never merged/ambiguous:
+    # if the Reviewer approved but Security then failed, the developer sees
+    # the SECURITY finding, not a mix). The latest of the three sources wins.
+    fix_instruction = _latest_fix_instruction(db, task.id)
 
     ctx = ExecutionContext(task_id=task.id, agent_type="developer", db=db)
     try:
@@ -600,39 +717,245 @@ async def _run_debugging(db: Session, task: Task, debugger) -> TaskStatus:
             f"unfixable:{classification.category}",
         )
 
-    # Fixable: bounded replan. The budget is enforced HERE at the transition
-    # (the Developer never sees it), under a fresh row lock — the debugger
+    # Fixable: bounded replan through the ONE shared replan path (Phase 9 —
+    # Debugger/Reviewer/Security all draw from the same max_replans budget,
+    # Section 42). The budget is enforced HERE at the transition (the
+    # Developer never sees it), under a fresh row lock — the debugger
     # committed internally, releasing the job's original FOR UPDATE lock.
-    locked = db.execute(
-        select(Task)
-        .where(Task.id == task.id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    ).scalar_one_or_none()
-    if locked is None:
-        return None
-    if TaskStatus(locked.status) is not TaskStatus.DEBUGGING:
-        logger.info(
-            "Task %s already at %s — skipping DEBUGGING replan transition",
-            task.id, locked.status,
-        )
-        return TaskStatus(locked.status)
-    if locked.max_replans is not None and locked.replan_count >= locked.max_replans:
-        logger.warning(
-            "Task %s replan budget exhausted (%d >= %d) — ESCALATED",
-            task.id, locked.replan_count, locked.max_replans,
-        )
-        transition_task(
-            db, locked, TaskStatus.ESCALATED, reason="replan_budget_exhausted"
-        )
-        db.commit()
-        return TaskStatus.ESCALATED
-    locked.replan_count += 1
-    transition_task(
-        db, locked, TaskStatus.IMPLEMENTING, reason="debugger_replan"
+    return _replan_to_implementing(
+        db, task.id, expected=TaskStatus.DEBUGGING, reason="debugger_replan"
     )
-    db.commit()
+
+
+async def _run_reviewing(db: Session, task: Task, reviewer) -> TaskStatus:
+    """REVIEWING (Phase 9): the Reviewer Agent critiques the commit, branch
+    for real.
+
+    The Reviewer sees the commit diff + the test result ONLY — the
+    ImplementationSummary is deliberately NOT passed (the agent's run
+    signature has no summary parameter; the prompt builder has no summary
+    field). Branching:
+
+    - APPROVE -> SECURITY_REVIEW (the state machine's only legal success
+      successor from REVIEWING).
+    - REQUEST_CHANGES / REJECT -> IMPLEMENTING through the shared replan
+      path, the issues labeled as the developer's fix instruction
+      (``_latest_fix_instruction`` picks them up on the next run), budget
+      enforced at the transition.
+    """
+    if reviewer is None:
+        logger.error("Task %s in REVIEWING but no reviewer agent", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.REVIEWING, TaskStatus.FAILED, "no_reviewer_agent"
+        )
+
+    from app.agents.reviewer.agent import ReviewerError
+    from app.agents.tester.schema import result_from_row
+    from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
+    from app.models import ImplementationSummary as SummaryRow
+    from app.models import TestRun
+    from app.tools.base import ExecutionContext
+
+    summary = db.scalar(
+        select(SummaryRow).where(SummaryRow.task_id == task.id)
+        .order_by(SummaryRow.created_at.desc(), SummaryRow.id.desc()).limit(1)
+    )
+    if summary is None or not summary.commit_sha:
+        logger.error(
+            "Task %s in REVIEWING but no implementation summary with a commit", task.id
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.REVIEWING, TaskStatus.FAILED,
+            "no_implementation_summary",
+        )
+    run = db.scalar(
+        select(TestRun).where(TestRun.task_id == task.id)
+        .order_by(TestRun.created_at.desc(), TestRun.id.desc()).limit(1)
+    )
+    if run is None:
+        logger.error("Task %s in REVIEWING but no test run exists", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.REVIEWING, TaskStatus.FAILED, "no_test_run"
+        )
+
+    ctx = ExecutionContext(task_id=task.id, agent_type="reviewer", db=db)
+    try:
+        review = await reviewer.run(task, summary.commit_sha, result_from_row(run), ctx)
+    except ReviewerError as exc:
+        logger.error("Task %s review failed: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.REVIEWING, TaskStatus.FAILED, "review_failed"
+        )
+    except (LLMTimeoutError, LLMMalformedOutputError) as exc:
+        logger.error("Task %s reviewer LLM error: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.REVIEWING, TaskStatus.FAILED, "review_llm_error"
+        )
+    except Exception:  # noqa: BLE001 — never hang, never silently continue
+        logger.exception("Task %s reviewer crashed", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.REVIEWING, TaskStatus.FAILED, "review_error"
+        )
+
+    if review.decision == "APPROVE":
+        logger.info("Task %s -> SECURITY_REVIEW (review approved)", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.REVIEWING, TaskStatus.SECURITY_REVIEW,
+            "review_approved",
+        )
+    reason = (
+        "review_requested_changes"
+        if review.decision == "REQUEST_CHANGES"
+        else "review_rejected"
+    )
     logger.info(
-        "Task %s -> IMPLEMENTING (debugger replan #%d)", task.id, locked.replan_count
+        "Task %s -> IMPLEMENTING (review %s)", task.id, review.decision
     )
-    return TaskStatus.IMPLEMENTING
+    return _replan_to_implementing(
+        db, task.id, expected=TaskStatus.REVIEWING, reason=reason
+    )
+
+
+async def _run_security_review(db: Session, task: Task, security) -> TaskStatus:
+    """SECURITY_REVIEW (Phase 9): the Security Agent runs its checklist on
+    the same commit, blind to the Reviewer's verdict.
+
+    - PASS -> VERIFICATION (the state machine's only legal success
+      successor from SECURITY_REVIEW).
+    - FAIL -> IMPLEMENTING through the shared replan path, the findings
+      labeled as the fix instruction, budget enforced at the transition.
+    """
+    if security is None:
+        logger.error("Task %s in SECURITY_REVIEW but no security agent", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            "no_security_agent",
+        )
+
+    from app.agents.security.agent import SecurityError
+    from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
+    from app.models import ImplementationSummary as SummaryRow
+    from app.tools.base import ExecutionContext
+
+    summary = db.scalar(
+        select(SummaryRow).where(SummaryRow.task_id == task.id)
+        .order_by(SummaryRow.created_at.desc(), SummaryRow.id.desc()).limit(1)
+    )
+    if summary is None or not summary.commit_sha:
+        logger.error(
+            "Task %s in SECURITY_REVIEW but no implementation summary with a commit",
+            task.id,
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            "no_implementation_summary",
+        )
+
+    ctx = ExecutionContext(task_id=task.id, agent_type="security", db=db)
+    try:
+        result = await security.run(task, summary.commit_sha, ctx)
+    except SecurityError as exc:
+        logger.error("Task %s security review failed: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            "security_failed",
+        )
+    except (LLMTimeoutError, LLMMalformedOutputError) as exc:
+        logger.error("Task %s security LLM error: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            "security_llm_error",
+        )
+    except Exception:  # noqa: BLE001 — never hang, never silently continue
+        logger.exception("Task %s security agent crashed", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            "security_error",
+        )
+
+    if result.decision == "PASS":
+        logger.info("Task %s -> VERIFICATION (security passed)", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.VERIFICATION,
+            "security_passed",
+        )
+    logger.info(
+        "Task %s -> IMPLEMENTING (security failed: %d findings)",
+        task.id, len(result.findings),
+    )
+    return _replan_to_implementing(
+        db, task.id, expected=TaskStatus.SECURITY_REVIEW, reason="security_failed"
+    )
+
+
+async def _run_verification(db: Session, task: Task) -> TaskStatus:
+    """VERIFICATION (Phase 9): a thin, code-only staleness check — no LLM.
+
+    Confirms the approval is still valid before PR_CREATION:
+
+    1. The commit that was reviewed is still the current HEAD of the
+       worktree branch (nothing changed between review and now — a real
+       possibility once replan loops exist).
+    2. The last test run still holds a "passed" status for that commit.
+
+    Either check failing = the review is STALE -> back to TESTING (re-run
+    the current state) rather than proceeding on an invalidated approval.
+    Both passing -> PR_CREATION.
+    """
+    from app.git.operations import GitOperations
+    from app.git.worktree_manager import WorktreeManager
+    from app.models import ImplementationSummary as SummaryRow
+    from app.models import TestRun
+
+    summary = db.scalar(
+        select(SummaryRow).where(SummaryRow.task_id == task.id)
+        .order_by(SummaryRow.created_at.desc(), SummaryRow.id.desc()).limit(1)
+    )
+    if summary is None or not summary.commit_sha:
+        logger.error(
+            "Task %s in VERIFICATION but no implementation summary with a commit",
+            task.id,
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.VERIFICATION, TaskStatus.FAILED,
+            "no_implementation_summary",
+        )
+
+    run = db.scalar(
+        select(TestRun).where(TestRun.task_id == task.id)
+        .order_by(TestRun.created_at.desc(), TestRun.id.desc()).limit(1)
+    )
+    tests_still_pass = run is not None and run.status == "passed"
+    if not tests_still_pass:
+        logger.warning(
+            "Task %s verification stale: last test run is %s, not passed — "
+            "back to TESTING", task.id, getattr(run, "status", None),
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.VERIFICATION, TaskStatus.TESTING, "stale_review"
+        )
+
+    try:
+        worktree = WorktreeManager(db).get_or_create_for_task(task)
+        head = GitOperations(worktree.path).head_sha()
+    except Exception as exc:  # noqa: BLE001 — a missing worktree is stale, not a crash
+        logger.warning(
+            "Task %s verification stale: cannot read worktree HEAD (%s)", task.id, exc
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.VERIFICATION, TaskStatus.TESTING, "stale_review"
+        )
+    if head != summary.commit_sha:
+        logger.warning(
+            "Task %s verification stale: HEAD %s != reviewed commit %s — "
+            "back to TESTING", task.id, head, summary.commit_sha,
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.VERIFICATION, TaskStatus.TESTING, "stale_review"
+        )
+
+    logger.info("Task %s -> PR_CREATION (verification passed)", task.id)
+    return _cas_transition(
+        db, task.id, TaskStatus.VERIFICATION, TaskStatus.PR_CREATION,
+        "verification_passed",
+    )

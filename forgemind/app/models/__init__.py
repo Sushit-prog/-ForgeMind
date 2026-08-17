@@ -20,6 +20,8 @@ from app.models.plan import Plan, PlanStep
 from app.models.policy import Policy
 from app.models.repository import Repository, Worktree
 from app.models.research_artifact import ResearchArtifact
+from app.models.review_result import ReviewResult
+from app.models.security_result import SecurityResult
 from app.models.task import Task, TaskStatus, TaskStep
 from app.models.test_run import Failure, TestRun
 from app.models.tool_call import ToolCall, ToolCallStatus
@@ -38,6 +40,8 @@ __all__ = [
     "Policy",
     "Repository",
     "ResearchArtifact",
+    "ReviewResult",
+    "SecurityResult",
     "Task",
     "TaskStatus",
     "TaskStep",

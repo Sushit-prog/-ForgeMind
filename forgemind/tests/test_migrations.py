@@ -30,6 +30,8 @@ EXPECTED_TABLES = {
     "test_runs",
     "failures",
     "failure_classifications",
+    "review_results",
+    "security_results",
 }
 
 

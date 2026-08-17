@@ -61,12 +61,14 @@ async def advance_task(ctx: dict, task_id: str) -> None:
         from app.agents.developer.agent import build_developer
         from app.agents.planner.agent import build_planner
         from app.agents.researcher.agent import build_researcher
+        from app.agents.reviewer.agent import build_reviewer
+        from app.agents.security.agent import build_security
         from app.agents.tester.agent import build_tester
 
         # Fresh agents per job: the stub provider's proposal script must start
         # over for each task (see module docstring). The tester is
-        # deterministic (no LLM provider at all) and the debugger's provider
-        # is per-job like the rest.
+        # deterministic (no LLM provider at all) and every other agent's
+        # provider is per-job like the rest.
         new_status = await advance_task_with_agents(
             db,
             task_uuid,
@@ -75,6 +77,8 @@ async def advance_task(ctx: dict, task_id: str) -> None:
             _build_agent(build_developer, "Developer"),
             _build_agent(build_tester, "Tester"),
             _build_agent(build_debugger, "Debugger"),
+            _build_agent(build_reviewer, "Reviewer"),
+            _build_agent(build_security, "Security"),
         )
     except IllegalTransitionError as exc:
         # Deterministic guard fired: log loudly, never silently update status.

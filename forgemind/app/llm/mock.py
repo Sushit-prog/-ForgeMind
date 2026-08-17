@@ -134,6 +134,56 @@ WRITE_RETRY_PROPOSAL = json.dumps(
     }
 )
 
+# --- reviewer + security canned responses (Phase 9) -------------------------
+# Both agents read src/app.py (like the debugger) then give a canned verdict.
+# The retry marker is the FIXED value text: after a reviewer/security replan
+# the developer writes VALUE = 3, so the SECOND review's read observation
+# contains "VALUE = 3" and the verdict flips REJECT/FAIL -> APPROVE/PASS.
+# Review 1 sees "VALUE = 2" -> the default (reject/fail) fires. This makes
+# the reject-then-approve and fail-then-pass loops deterministic in e2e.
+
+REVIEWER_READ_PROPOSAL = json.dumps(
+    {"tool_call": {"tool": "repository.read_file", "input": {"path": "src/app.py"}}}
+)
+REVIEW_APPROVE = json.dumps({"decision": "APPROVE", "issues": [], "severity": "low"})
+REVIEW_REJECT = json.dumps(
+    {
+        "decision": "REQUEST_CHANGES",
+        "issues": [
+            {
+                "description": "Use VALUE = 3 to match the documented constant.",
+                "severity": "medium",
+                "file": "src/app.py",
+                "line": 1,
+            }
+        ],
+        "severity": "medium",
+    }
+)
+
+SECURITY_READ_PROPOSAL = json.dumps(
+    {"tool_call": {"tool": "repository.read_file", "input": {"path": "src/app.py"}}}
+)
+SECURITY_PASS = json.dumps({"decision": "PASS", "findings": []})
+SECURITY_FAIL = json.dumps(
+    {
+        "decision": "FAIL",
+        "findings": [
+            {
+                "category": "SECRETS",
+                "file": "src/app.py",
+                "line": 1,
+                "description": "Hardcoded value should be the documented constant 3.",
+                "severity": "medium",
+            }
+        ],
+    }
+)
+
+# Marker shared by reviewer + security retry queues: appears in the second
+# review's observation only (after the developer applied the fix).
+FIXED_VALUE_MARKER = "VALUE = 3"
+
 
 def _joined(messages: list[Message] | None) -> str:
     return "\n".join(m.content for m in (messages or []))
@@ -142,16 +192,15 @@ def _joined(messages: list[Message] | None) -> str:
 def default_by_schema(
     flaky_planner: bool = False, *, agent: str = "research"
 ) -> dict[str, list[str]]:
-    """The worker's default per-schema script (planner + research + developer
-    + debugger).
+    """The worker's default per-schema script (all agents Phase 9).
 
     Every agent builds its OWN provider instance in the worker, so the
     ``ToolCallProposal`` queue must be correct for that agent's FIRST tool
     call — research starts with a search (then final), the developer starts
     with a write (then commit, then final), the debugger starts with a read
-    (then final). A developer run whose first proposal is a search (or
-    final) would burn the whole run without committing — a hard failure,
-    not a recoverable probe.
+    (then final), reviewer + security start with a read too. A developer
+    run whose first proposal is a search (or final) would burn the whole
+    run without committing — a hard failure, not a recoverable probe.
     """
     plan_queue = (
         [MALFORMED_RESPONSE, DEFAULT_PLAN_RESPONSE]
@@ -162,6 +211,8 @@ def default_by_schema(
         tool_queue = [WRITE_PROPOSAL, COMMIT_PROPOSAL, FINAL_PROPOSAL]
     elif agent == "debugger":
         tool_queue = [DEBUGGER_READ_PROPOSAL, FINAL_PROPOSAL]
+    elif agent in ("reviewer", "security"):
+        tool_queue = [REVIEWER_READ_PROPOSAL, FINAL_PROPOSAL]
     else:  # research
         tool_queue = [SEARCH_PROPOSAL, FINAL_PROPOSAL]
     return {
@@ -170,6 +221,8 @@ def default_by_schema(
         "ResearchArtifact": [RESEARCH_ARTIFACT_RESPONSE],
         "ImplementationSummaryDraft": [IMPLEMENTATION_SUMMARY_RESPONSE],
         "FailureClassification": [FAILURE_CLASSIFICATION_RESPONSE],
+        "ReviewResult": [REVIEW_APPROVE],
+        "SecurityResult": [SECURITY_PASS],
     }
 
 

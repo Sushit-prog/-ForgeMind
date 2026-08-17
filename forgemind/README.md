@@ -54,6 +54,20 @@ Current milestone scope:
   transition (`max_replans` exhausted → ESCALATED); unfixable → FAILED with the category
   attached. Timeouts are status "error" (distinct from "failed") so a hung suite is never
   confused with a clean failing exit code.
+- **Phase 9 — Reviewer + Security Agents**: REVIEWING → SECURITY_REVIEW → VERIFICATION become
+  real. The Reviewer independently critiques the developer's commit (correctness,
+  architecture, test quality, regressions) from the commit diff + test result ONLY — the
+  ImplementationSummary is never passed in (the agent's run signature has no summary
+  parameter, so the independence is structural, not instructional); it can genuinely
+  REJECT/REQUEST_CHANGES, and does so in tests. The Security Agent runs a checklist
+  (injection, secrets, unsafe subprocess/network, path traversal, auth/authz) on the same
+  commit, blind to the Reviewer's verdict. REVIEWING branches APPROVE → SECURITY_REVIEW /
+  REQUEST_CHANGES|REJECT → IMPLEMENTING; SECURITY_REVIEW branches PASS → VERIFICATION / FAIL
+  → IMPLEMENTING — both replans draw from the ONE shared `max_replans` budget via a single
+  replan path, with the fix instruction labeled by source (`[REVIEWER …]`/`[SECURITY]`,
+  never merged/ambiguous). VERIFICATION is a plain-code staleness check (no LLM): the
+  reviewed commit must still be worktree HEAD and the last test run still passed, else back
+  to TESTING (stale review).
 
 ## Quick start
 
@@ -99,10 +113,11 @@ curl localhost:8000/health               # {"status": "ok"}
 ```bash
 pytest              # hermetic suite (SQLite, no services) — state machine, lifecycle, API,
                     # policy engine, path traversal (read + write), git runtime, planner,
-                    # research + developer + tester + debugger agents
+                    # research + developer + tester + debugger + reviewer + security agents
 pytest tests_e2e/   # end-to-end (needs Postgres + Redis up) — real worker pipeline, cancel,
-                    # crash recovery (kill/restart), two-worker concurrency, research + developer
-                    # + test/debugger loops (REAL subprocess test runs)
+                    # crash recovery (kill/restart), two-worker concurrency, full agent loops
+                    # (REAL subprocess test runs, review reject-then-approve, security fail-
+                    # then-pass, verification staleness)
 ```
 
 Note: `tests_e2e/` spawns its OWN worker subprocesses on the same Postgres/Redis, so stop the
@@ -124,6 +139,10 @@ app/
     tester/                 TestAgent: deterministic shell.run_test + pytest parser (no LLM)
     debugger/               DebuggerAgent: read-only investigation + flakiness re-run +
                             FailureClassification (category, root cause, fix instruction)
+    reviewer/               ReviewerAgent: read-only loop critiquing the commit diff + test
+                            result only (structural independence from the developer's summary)
+    security/               SecurityAgent: read-only checklist scan (injection, secrets,
+                            subprocess/network, traversal, auth/authz) — blind to the verdict
   api/routes/tasks.py       Task API: create/list/get/cancel/events
   capabilities/             Capability value objects + per-agent assignment (Section H)
   database/                 engine/session + Alembic migrations
@@ -154,8 +173,8 @@ app/
                             filesystem.* / shell.* tools
   worker/
     queue.py                arq Redis settings + pool + enqueue helper
-    jobs/advance_task.py    one job = one transition (PLANNING/RESEARCHING/IMPLEMENTING run
-                            the real agents)
+    jobs/advance_task.py    one job = one transition (PLANNING/RESEARCHING/IMPLEMENTING/
+                            TESTING/DEBUGGING/REVIEWING/SECURITY_REVIEW run the real agents)
     worker.py               arq entrypoint + startup sweep (crash recovery)
   config.py                 env-driven settings (secrets never hardcoded/logged)
   logging.py                logging setup with URL redaction
@@ -239,6 +258,38 @@ Example tools prove the paths: `example.echo` (executes), `example.read_file`
 - **Denials are Research-style here**: the Debugger is read-only by contract, so a write
   proposal is a benign mistake (absorbed as an observation, still audited
   `debugger.unexpected_denial`) — NOT Developer-style unexpected behavior.
+
+## Reviewer + Security Agents (Phase 9)
+
+- **Independence is structural, not instructional**: the Reviewer's `run` signature takes
+  `commit_sha` + `test_result` — there is NO ImplementationSummary parameter, and the prompt
+  builder has no summary field, so the developer's self-reported story cannot be threaded
+  into the review without changing the function signature. Security is one step further:
+  `run` takes only `commit_sha`, blind to the Reviewer's verdict too. The independence test
+  is the phase's most important one: a plausible-sounding summary + a diff with a real
+  problem — the Reviewer must flag the diff-level problem because the summary text is
+  structurally absent.
+- **Both are read-only loops** (propose → pipeline → observation → bounded → forced
+  synthesis, the Phase 6/8 skeleton). A write proposal is DENIED and audited
+  `reviewer.unexpected_denial` / `security.unexpected_denial` (Developer-style unexpected,
+  not Research-style benign — neither agent has a legitimate reason to probe write access).
+- **REVIEWING branches for real**: APPROVE → SECURITY_REVIEW; REQUEST_CHANGES/REJECT →
+  IMPLEMENTING through the shared replan path with the issues as the fix instruction
+  (`[REVIEWER REQUEST_CHANGES] …`). SECURITY_REVIEW: PASS → VERIFICATION; FAIL →
+  IMPLEMENTING with the findings as the fix instruction (`[SECURITY] …`) — the developer's
+  next run clearly sees WHICH gate failed and why, never a merged/ambiguous instruction.
+- **One shared replan budget**: Debugger, Reviewer, and Security replans all go through
+  `_replan_to_implementing` — one `max_replans` on the task row (Section 42), counted once,
+  enforced at the transition (exhausted → ESCALATED). Two consecutive replans from different
+  sources accumulate correctly (tested); there is deliberately no per-source budget.
+- **VERIFICATION is plain code, no LLM** — a staleness check that the approval is still
+  valid: the reviewed commit must still be the worktree HEAD (a replan could have landed a
+  new commit) AND the last test run must still be `passed`. Either failing → back to TESTING
+  (`stale_review`), never proceeding on an invalidated approval. Tested both ways: pass-
+  through, and a simulated stale commit caught by the HEAD check.
+- **Security's checklist is tested against planted examples**: injection, secrets, unsafe
+  subprocess/network, path traversal, auth/authz — one deliberately planted finding per
+  category in a test diff, each caught by the (mocked-LLM) Security agent.
 
 ## Developer Agent (Phase 7)
 
@@ -330,8 +381,8 @@ Tables (architecture doc section G, milestone scope): `tasks`, `plans` (incl.
 `raw_llm_output`), `plan_steps`, `task_steps`, `capabilities`, `policies`, `audit_logs`,
 `repositories` (incl. `local_clone_path`), `worktrees`, `execution_events`, `tool_calls`,
 `research_artifacts`, `implementation_summaries`, `test_runs`, `failures`,
-`failure_classifications`. Remaining Section-G tables arrive with the phases that use them
-(agents/eval). Tasks default to a bounded replan budget
+`failure_classifications`, `review_results`, `security_results`. Remaining Section-G
+tables arrive with the phases that use them (agents/eval). Tasks default to a bounded replan budget
 (`max_replans=3`) — Section D's "budget exhausted → ESCALATED" is enforced even when the API
 client sets no budget.
 

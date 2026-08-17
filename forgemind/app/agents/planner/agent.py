@@ -237,18 +237,51 @@ def build_provider(role: str = "planner"):
                 WRITE_RETRY_PROPOSAL,
             )
 
-            # A developer run AFTER a debugging replan receives the debugger's
-            # fix instruction as DATA — the stub then proposes the FIXED write
-            # (mock-only message-keyed queue; real providers respond to the
-            # instruction naturally).
+            # A developer run AFTER any replan (debugger/reviewer/security)
+            # receives the fix instruction as DATA — the stub then proposes
+            # the FIXED write (mock-only message-keyed queue; real providers
+            # respond to the instruction naturally).
             retry = {
                 "retry_by_schema": {
                     "ToolCallProposal": [
                         WRITE_RETRY_PROPOSAL, COMMIT_PROPOSAL, FINAL_PROPOSAL,
                     ]
                 },
-                "retry_marker": "FIX INSTRUCTION FROM THE DEBUGGER",
+                "retry_marker": "FIX INSTRUCTION (DATA)",
             }
+        elif role == "reviewer":
+            # Reject-then-approve loop: the reviewer reads src/app.py; the
+            # FIRST review sees VALUE = 2 -> REJECT (default queue); after
+            # the developer applies the fix (VALUE = 3), the SECOND review's
+            # read observation contains "VALUE = 3" -> APPROVE (retry queue).
+            # Enabled by env so the plain happy path (approve first time)
+            # stays the default for other e2e tests.
+            if os.environ.get("FORGEMIND_MOCK_REVIEW_REJECT") == "1":
+                from app.llm.mock import FIXED_VALUE_MARKER, REVIEW_APPROVE, REVIEW_REJECT
+
+                retry = {
+                    "retry_by_schema": {"ReviewResult": [REVIEW_APPROVE]},
+                    "retry_marker": FIXED_VALUE_MARKER,
+                }
+                by_schema = default_by_schema(agent=role)
+                by_schema["ReviewResult"] = [REVIEW_REJECT]
+                return StubLLMProvider(by_schema=by_schema, **retry)
+        elif role == "security":
+            # Fail-then-pass loop, same marker mechanism as the reviewer.
+            if os.environ.get("FORGEMIND_MOCK_SECURITY_FAIL") == "1":
+                from app.llm.mock import (
+                    FIXED_VALUE_MARKER,
+                    SECURITY_FAIL,
+                    SECURITY_PASS,
+                )
+
+                retry = {
+                    "retry_by_schema": {"SecurityResult": [SECURITY_PASS]},
+                    "retry_marker": FIXED_VALUE_MARKER,
+                }
+                by_schema = default_by_schema(agent=role)
+                by_schema["SecurityResult"] = [SECURITY_FAIL]
+                return StubLLMProvider(by_schema=by_schema, **retry)
         return StubLLMProvider(
             by_schema=default_by_schema(flaky_planner=flaky, agent=role), **retry or {}
         )

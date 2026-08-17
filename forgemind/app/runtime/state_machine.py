@@ -53,7 +53,11 @@ def _all_transitions() -> dict[TaskStatus, set[TaskStatus]]:
         TaskStatus.DEBUGGING: {TaskStatus.IMPLEMENTING, TaskStatus.REVIEWING},
         TaskStatus.REVIEWING: {TaskStatus.SECURITY_REVIEW, TaskStatus.IMPLEMENTING},
         TaskStatus.SECURITY_REVIEW: {TaskStatus.VERIFICATION, TaskStatus.IMPLEMENTING},
-        TaskStatus.VERIFICATION: {TaskStatus.PR_CREATION},
+        # VERIFICATION -> TESTING: the Phase 9 staleness check found the
+        # reviewed commit is no longer the worktree HEAD (a replan landed a
+        # new commit) or the passing test no longer holds — the approval is
+        # stale, so the pipeline re-tests rather than proceeding.
+        TaskStatus.VERIFICATION: {TaskStatus.PR_CREATION, TaskStatus.TESTING},
         TaskStatus.PR_CREATION: {TaskStatus.AWAITING_APPROVAL},
         TaskStatus.AWAITING_APPROVAL: {TaskStatus.COMPLETED, TaskStatus.REPLANNING},
         TaskStatus.COMPLETED: set(),

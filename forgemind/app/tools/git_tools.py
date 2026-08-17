@@ -27,6 +27,12 @@ class StatusOutput(BaseModel):
 
 class DiffInput(WorktreeInput):
     staged: bool = False
+    # The commit whose diff to show (Phase 9: Reviewer/Security review the
+    # developer's already-committed change, so the working tree is clean).
+    # Hex sha, validated — a single argument, never a shell string.
+    commit: str | None = Field(
+        default=None, max_length=64, pattern=r"^[0-9a-fA-F]{7,64}$"
+    )
 
 
 class DiffOutput(BaseModel):
@@ -82,7 +88,10 @@ class StatusTool(Tool):
 
 class DiffTool(Tool):
     name = "git.diff"
-    description = "Worktree diff (unstaged by default, or staged with staged=true)."
+    description = (
+        "Worktree diff (unstaged by default, or staged with staged=true), or "
+        "the diff of a specific commit with commit=<sha> (Reviewer/Security)."
+    )
     input_schema = DiffInput
     output_schema = DiffOutput
     capabilities: list[str] = ["git.read"]
@@ -90,7 +99,7 @@ class DiffTool(Tool):
 
     async def execute(self, input: DiffInput, ctx: ExecutionContext) -> DiffOutput:
         ops, _ = _ops_for(ctx, input.worktree_id)
-        return DiffOutput(diff=ops.diff(staged=input.staged))
+        return DiffOutput(diff=ops.diff(staged=input.staged, commit=input.commit))
 
 
 class LogTool(Tool):
