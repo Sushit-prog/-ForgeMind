@@ -205,12 +205,16 @@ class PlanningAgent(Agent):
         logger.error("Planner failed for task %s (%s); raw output preserved", task.id, reason)
 
 
-def build_provider():
+def build_provider(role: str = "planner"):
     """Construct the LLM provider from settings/env (shared by all agents).
 
     Order: real OpenRouter when a key is configured; else the stub
     provider when ``FORGEMIND_MOCK_LLM=1`` (tests / key-less dev); else a
     clear ``PlannerConfigError``.
+
+    ``role`` selects the stub provider's per-schema script (research vs
+    developer propose different first tool calls), so each agent builds its
+    own provider with a script correct for ITS loop.
     """
     from app.llm.mock import StubLLMProvider, default_by_schema
     from app.llm.openrouter import OpenRouterProvider
@@ -225,7 +229,7 @@ def build_provider():
         )
     if os.environ.get("FORGEMIND_MOCK_LLM") == "1":
         flaky = os.environ.get("FORGEMIND_MOCK_LLM_FLAKY") == "1"
-        return StubLLMProvider(by_schema=default_by_schema(flaky_planner=flaky))
+        return StubLLMProvider(by_schema=default_by_schema(flaky_planner=flaky, agent=role))
     raise PlannerConfigError(
         "no LLM provider configured: set OPENROUTER_API_KEY (and LLM_MODEL_PLANNER) "
         "or FORGEMIND_MOCK_LLM=1 for key-less development"

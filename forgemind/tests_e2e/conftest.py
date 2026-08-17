@@ -74,12 +74,19 @@ def _apply_migrations():
 
 @pytest.fixture()
 def client():
-    """TestClient bound to Postgres, with a clean schema per test."""
+    """TestClient bound to Postgres, with a clean schema + queue per test.
+
+    Redis is flushed too: failed jobs (agent errors schedule arq retries with
+    backoff) would otherwise linger across tests, and the startup sweep would
+    re-enqueue them — a crash-flag worker could then die processing a STALE
+    job instead of the test's own task."""
     _truncate_all()
+    _flush_redis()
     app = create_app()
     with TestClient(app) as test_client:
         yield test_client
     _truncate_all()
+    _flush_redis()
 
 
 @pytest.fixture()
@@ -132,6 +139,28 @@ def _truncate_all() -> None:
                 "tool_calls, worktrees RESTART IDENTITY CASCADE"
             )
         )
+
+
+def _flush_redis() -> None:
+    """Drop every arq job key (queued + retry state) so tests start with a
+    clean queue. The worker subprocesses connect via the same Redis."""
+    import asyncio
+
+    from app.worker.queue import get_redis_settings
+
+    async def _flush() -> None:
+        import redis.asyncio as aioredis
+
+        settings = get_redis_settings()
+        client = aioredis.Redis(
+            host=settings.host, port=settings.port, db=settings.database
+        )
+        try:
+            await client.flushdb()
+        finally:
+            await client.aclose()
+
+    asyncio.run(_flush())
 
 
 def wait_for(predicate, timeout: float = 30.0, interval: float = 0.1) -> bool:

@@ -148,6 +148,55 @@ def test_symlink_inside_root_is_allowed(worktree) -> None:
     assert "safe-value" in access.read_file("src/config_alias.py")
 
 
+# --- symlink attacks on the WRITE path (Phase 7) -----------------------------
+# ``filesystem.write_file`` reuses the exact same ``_resolve`` containment
+# check as reads, so a symlink escaping the root must be rejected BEFORE any
+# write — the write side of the Phase-4 read-side defense. These run on
+# Linux/WSL where unprivileged symlink creation works.
+
+
+def test_symlink_file_escape_write_rejected(worktree) -> None:
+    """A symlink pointing at an outside file: writing through it must raise
+    before anything is written — the outside file stays byte-identical."""
+    outside_secret = worktree.parent / "secrets.env"
+    outside_secret.write_text(OUTSIDE_SECRET)
+    link = worktree / "leak.txt"
+    if not try_symlink(outside_secret, link):
+        pytest.skip("symlinks not permitted on this platform")
+
+    access = FileAccess(worktree)
+    with pytest.raises(PathTraversalError):
+        access.write_file("leak.txt", "pwned-content")
+    # The write never went through the symlink: the outside file is untouched.
+    assert outside_secret.read_text() == OUTSIDE_SECRET
+
+
+def test_symlink_directory_escape_write_rejected(worktree) -> None:
+    """A symlinked directory escaping the root: writing a new file beneath it
+    must raise, and nothing may be created outside the root."""
+    outside_dir = worktree.parent / "outside_dir"
+    outside_dir.mkdir()
+    link = worktree / "src" / "linkdir"
+    if not try_symlink(outside_dir, link):
+        pytest.skip("symlinks not permitted on this platform")
+
+    access = FileAccess(worktree)
+    with pytest.raises(PathTraversalError):
+        access.write_file("src/linkdir/evil.py", "import os; os.system('x')")
+    assert not (outside_dir / "evil.py").exists()
+
+
+def test_symlink_inside_root_write_is_allowed(worktree) -> None:
+    """A symlink that stays inside the root is legitimate for writes too."""
+    target = worktree / "src" / "app.py"
+    link = worktree / "config_alias.py"
+    if not try_symlink(target, link):
+        pytest.skip("symlinks not permitted on this platform")
+    access = FileAccess(worktree)
+    access.write_file("config_alias.py", "def main():\n    return 7\n")
+    assert "return 7" in access.read_file("src/app.py")
+
+
 # --- benign behavior --------------------------------------------------------
 
 def test_benign_reads_work(worktree) -> None:

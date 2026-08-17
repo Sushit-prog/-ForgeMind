@@ -310,4 +310,4 @@ def build_researcher() -> ResearchAgent:
     """Construct the research agent from settings/env (worker entrypoint)."""
     from app.agents.planner.agent import build_provider
 
-    return ResearchAgent(build_provider())
+    return ResearchAgent(build_provider(role="research"))

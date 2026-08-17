@@ -104,26 +104,31 @@ IMPLEMENTATION_SUMMARY_RESPONSE = json.dumps(
 )
 
 
-def default_by_schema(flaky_planner: bool = False) -> dict[str, list[str]]:
+def default_by_schema(
+    flaky_planner: bool = False, *, agent: str = "research"
+) -> dict[str, list[str]]:
     """The worker's default per-schema script (planner + research + developer).
 
-    ``ToolCallProposal`` is one shared queue consumed in order: research takes
-    the first two (search, final), developer takes the next three (write,
-    commit, final)."""
+    Every agent builds its OWN provider instance in the worker, so the
+    ``ToolCallProposal`` queue must be correct for that agent's FIRST tool
+    call — research starts with a search (then final), the developer starts
+    with a write (then commit, then final). A developer run whose first
+    proposal is a search (or final) would burn the whole run without
+    committing — a hard failure, not a recoverable probe.
+    """
     plan_queue = (
         [MALFORMED_RESPONSE, DEFAULT_PLAN_RESPONSE]
         if flaky_planner
         else [DEFAULT_PLAN_RESPONSE]
     )
+    tool_queue = (
+        [WRITE_PROPOSAL, COMMIT_PROPOSAL, FINAL_PROPOSAL]
+        if agent == "developer"
+        else [SEARCH_PROPOSAL, FINAL_PROPOSAL]
+    )
     return {
         "Plan": plan_queue,
-        "ToolCallProposal": [
-            SEARCH_PROPOSAL,
-            FINAL_PROPOSAL,
-            WRITE_PROPOSAL,
-            COMMIT_PROPOSAL,
-            FINAL_PROPOSAL,
-        ],
+        "ToolCallProposal": tool_queue,
         "ResearchArtifact": [RESEARCH_ARTIFACT_RESPONSE],
         "ImplementationSummaryDraft": [IMPLEMENTATION_SUMMARY_RESPONSE],
     }

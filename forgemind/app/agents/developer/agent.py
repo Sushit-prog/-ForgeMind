@@ -496,4 +496,7 @@ def build_developer() -> DeveloperAgent:
     """Construct the developer agent from settings/env (worker entrypoint)."""
     from app.agents.planner.agent import build_provider
 
-    return DeveloperAgent(build_provider())
+    # role="developer": the stub provider's proposal script must start with a
+    # WRITE, not a research-flavored search — a first proposal of search/final
+    # would burn the run without committing (a hard failure).
+    return DeveloperAgent(build_provider(role="developer"))

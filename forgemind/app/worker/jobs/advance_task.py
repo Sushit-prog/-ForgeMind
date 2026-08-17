@@ -9,6 +9,13 @@ applied atomically under a row lock; if it succeeds the job re-enqueues
 itself so the pipeline keeps moving. Illegal transitions are caught,
 logged, and never silently applied. A crash between the commit and the
 re-enqueue is healed by the worker's startup sweep (Section J).
+
+Agents are built PER JOB, never cached: the stub LLM provider's canned
+script is per-task state (each agent run consumes its proposal queue), so
+reusing one agent instance across tasks would exhaust the script and leave
+later tasks with no proposals — fatal for the developer, whose zero-commit
+path is a hard failure. Real providers are stateless, so per-job
+construction costs nothing and is the honest model.
 """
 
 from __future__ import annotations
@@ -26,54 +33,15 @@ from app.worker.queue import JOB_ADVANCE_TASK
 
 logger = logging.getLogger(__name__)
 
-_planner = None
-_researcher = None
-_developer = None
 
-
-def _get_planner():
-    """Lazily-built planner (real OpenRouter or stub). None when unconfigured
-    — PLANNING tasks then fail cleanly instead of hanging."""
-    global _planner
-    if _planner is None:
-        try:
-            from app.agents.planner.agent import build_planner
-
-            _planner = build_planner()
-        except Exception as exc:  # noqa: BLE001 — unconfigured provider
-            logger.warning("Planner unavailable (%s); PLANNING tasks will fail", exc)
-            _planner = None
-    return _planner
-
-
-def _get_researcher():
-    """Lazily-built researcher (real OpenRouter or stub). None when
-    unconfigured — RESEARCHING tasks then fail cleanly instead of hanging."""
-    global _researcher
-    if _researcher is None:
-        try:
-            from app.agents.researcher.agent import build_researcher
-
-            _researcher = build_researcher()
-        except Exception as exc:  # noqa: BLE001 — unconfigured provider
-            logger.warning("Researcher unavailable (%s); RESEARCHING tasks will fail", exc)
-            _researcher = None
-    return _researcher
-
-
-def _get_developer():
-    """Lazily-built developer (real OpenRouter or stub). None when
-    unconfigured — IMPLEMENTING tasks then fail cleanly instead of hanging."""
-    global _developer
-    if _developer is None:
-        try:
-            from app.agents.developer.agent import build_developer
-
-            _developer = build_developer()
-        except Exception as exc:  # noqa: BLE001 — unconfigured provider
-            logger.warning("Developer unavailable (%s); IMPLEMENTING tasks will fail", exc)
-            _developer = None
-    return _developer
+def _build_agent(build_fn, label: str):
+    """Construct one agent fresh (real OpenRouter or stub). None when
+    unconfigured — its state's tasks then fail cleanly instead of hanging."""
+    try:
+        return build_fn()
+    except Exception as exc:  # noqa: BLE001 — unconfigured provider
+        logger.warning("%s unavailable (%s); its tasks will fail", label, exc)
+        return None
 
 
 async def advance_task(ctx: dict, task_id: str) -> None:
@@ -86,8 +54,18 @@ async def advance_task(ctx: dict, task_id: str) -> None:
     task_uuid = uuid.UUID(task_id)
     db = SessionLocal()
     try:
+        from app.agents.developer.agent import build_developer
+        from app.agents.planner.agent import build_planner
+        from app.agents.researcher.agent import build_researcher
+
+        # Fresh agents per job: the stub provider's proposal script must start
+        # over for each task (see module docstring).
         new_status = await advance_task_with_agents(
-            db, task_uuid, _get_planner(), _get_researcher(), _get_developer()
+            db,
+            task_uuid,
+            _build_agent(build_planner, "Planner"),
+            _build_agent(build_researcher, "Researcher"),
+            _build_agent(build_developer, "Developer"),
         )
     except IllegalTransitionError as exc:
         # Deterministic guard fired: log loudly, never silently update status.
@@ -102,8 +80,10 @@ async def advance_task(ctx: dict, task_id: str) -> None:
 
     # Test hook: simulate a crash in the window between the transition
     # committing and the re-enqueue — exactly what the startup sweep heals.
-    # Never set outside tests.
-    if os.environ.get("FORGEMIND_CRASH_AFTER_COMMIT") == "1":
+    # Never set outside tests. Only fires when a transition actually
+    # committed, so a stale job (task not found, already advanced) cannot
+    # kill the worker before it processes the test's own task.
+    if new_status is not None and os.environ.get("FORGEMIND_CRASH_AFTER_COMMIT") == "1":
         logger.warning("FORGEMIND_CRASH_AFTER_COMMIT set — simulating crash after commit")
         os._exit(1)
 
