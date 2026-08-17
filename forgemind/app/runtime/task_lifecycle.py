@@ -1,4 +1,4 @@
-"""Task lifecycle: applying transitions to the DB and driving the stub pipeline.
+"""Task lifecycle: applying transitions to the DB and driving the pipeline.
 
 - ``transition_task`` applies ONE legal transition and writes the matching
   ``execution_event`` in the same transaction — a task can never be observed
@@ -7,9 +7,14 @@
 - ``advance_task_once`` is the worker's unit of work: SELECT ... FOR UPDATE,
   compute the next stub transition, apply it, commit. Row-level locking
   serializes concurrent workers (Section D / edge cases).
-- ``next_status`` is the *stub* pipeline driver for this milestone: no agents
-  exist yet, so transitions are instant and deterministic. A future phase
-  replaces it with agent-driven transition decisions.
+- ``advance_task_with_agents`` routes PLANNING/RESEARCHING/IMPLEMENTING
+  through the real Planning/Research/Developer agents; every other state
+  falls through to the stub driver.
+- ``next_status`` is still the *stub* transition decision for the non-agent
+  states. For IMPLEMENTING the successor is deterministic (TESTING is the
+  state machine's only legal success next state), so this is not yet a
+  hardcoded happy-path choice; the real decision stub is TESTING's
+  pass/fail branching, which arrives with the Test Agent in Phase 8.
 """
 
 from __future__ import annotations
@@ -183,18 +188,20 @@ async def advance_task_with_agents(
     task_id: uuid.UUID,
     planner=None,
     researcher=None,
+    developer=None,
 ) -> TaskStatus | None:
-    """Worker unit of work (Phases 5/6): the LLM states run the real agents.
+    """Worker unit of work (Phases 5-7): the LLM states run the real agents.
 
-    - PLANNING: run ``planner.run``; RESEARCHING: run ``researcher.run``.
-      Each persists its artifact, and the transition to the next state fires
-      only after persistence. On failure the task goes FAILED (never
-      ESCALATED — reserved for replan-budget exhaustion), with the reason on
-      the execution event.
+    - PLANNING: run ``planner.run``; RESEARCHING: run ``researcher.run``;
+      IMPLEMENTING: run ``developer.run`` with the persisted plan's implement
+      step + the latest research artifact. Each persists its artifact, and
+      the transition to the next state fires only after persistence. On
+      failure the task goes FAILED (never ESCALATED — reserved for
+      replan-budget exhaustion), with the reason on the execution event.
     - every other state: identical to the stub ``advance_task_once``.
 
-    ``planner``/``researcher`` may be None (no provider configured) — the
-    task then fails cleanly instead of hanging.
+    ``planner``/``researcher``/``developer`` may be None (no provider
+    configured) — the task then fails cleanly instead of hanging.
     """
     task = db.execute(
         select(Task).where(Task.id == task_id).with_for_update()
@@ -208,6 +215,8 @@ async def advance_task_with_agents(
         return await _run_planning(db, task, planner)
     if current is TaskStatus.RESEARCHING:
         return await _run_researching(db, task, researcher)
+    if current is TaskStatus.IMPLEMENTING:
+        return await _run_implementing(db, task, developer)
     return advance_task_once(db, task_id)
 
 
@@ -339,4 +348,80 @@ async def _run_researching(db: Session, task: Task, researcher) -> TaskStatus:
     logger.info("Task %s -> IMPLEMENTING (research artifact persisted)", task.id)
     return _cas_transition(
         db, task.id, TaskStatus.RESEARCHING, TaskStatus.IMPLEMENTING, "artifact_persisted"
+    )
+
+
+async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
+    """IMPLEMENTING: real Developer Agent or a clean FAILED (no agent).
+
+    The developer receives the ACTIVE plan's implement step and the task's
+    most recent research artifact; it must persist a real commit + grounded
+    ImplementationSummary before the transition to TESTING fires. TESTING is
+    the state machine's ONLY legal success successor from IMPLEMENTING, so
+    routing there on success is deterministic, not a stub "happy-path"
+    choice (the real decision stub is TESTING's branching, which arrives
+    with the Test Agent in Phase 8).
+    """
+    if developer is None:
+        logger.error("Task %s in IMPLEMENTING but no developer agent", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "no_developer_agent"
+        )
+
+    from app.agents.developer.agent import DeveloperError
+    from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
+    from app.models import Plan as PlanRow
+    from app.models import PlanStep as PlanStepRow
+    from app.models import ResearchArtifact as ArtifactRow
+    from app.tools.base import ExecutionContext
+
+    plan = db.scalar(
+        select(PlanRow).where(
+            PlanRow.task_id == task.id, PlanRow.status == "ACTIVE"
+        ).order_by(PlanRow.created_at.desc()).limit(1)
+    )
+    implement_step = None
+    if plan is not None:
+        implement_step = db.scalar(
+            select(PlanStepRow).where(
+                PlanStepRow.plan_id == plan.id, PlanStepRow.step_type == "implement"
+            ).order_by(PlanStepRow.sequence).limit(1)
+        )
+    if implement_step is None:
+        logger.error("Task %s in IMPLEMENTING but its active plan has no implement step", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "no_implement_step"
+        )
+
+    artifact = db.scalar(
+        select(ArtifactRow).where(ArtifactRow.task_id == task.id)
+        .order_by(ArtifactRow.created_at.desc()).limit(1)
+    )
+    if artifact is None:
+        logger.error("Task %s in IMPLEMENTING but no research artifact exists", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "no_research_artifact"
+        )
+
+    ctx = ExecutionContext(task_id=task.id, agent_type="developer", db=db)
+    try:
+        await developer.run(task, implement_step, artifact, ctx)
+    except DeveloperError as exc:
+        logger.error("Task %s implementation failed: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "developer_failed"
+        )
+    except (LLMTimeoutError, LLMMalformedOutputError) as exc:
+        logger.error("Task %s developer LLM error: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "developer_llm_error"
+        )
+    except Exception:  # noqa: BLE001 — never hang, never silently continue
+        logger.exception("Task %s developer crashed", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "developer_error"
+        )
+    logger.info("Task %s -> TESTING (implementation summary persisted)", task.id)
+    return _cas_transition(
+        db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.TESTING, "implementation_persisted"
     )

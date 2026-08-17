@@ -89,10 +89,19 @@ def test_no_planner_fails_task_cleanly(db_session, repo_task) -> None:
     assert events_for(db_session, task.id)[-1].reason == "no_llm_provider"
 
 
-def test_non_planning_states_use_stub_and_never_call_planner(db_session, repo_task) -> None:
+def test_non_agent_states_use_stub_and_never_call_planner(db_session, repo_task) -> None:
+    """States other than PLANNING/RESEARCHING/IMPLEMENTING (Phase 7) are still
+    stub-driven: they never invoke the planner. TESTING is the next stub state
+    after the real agent states."""
     repo, task = repo_task
-    # Advance the stub to IMPLEMENTING (bypassing PLANNING semantics).
-    for target in (TaskStatus.PLANNING, TaskStatus.RESEARCHING, TaskStatus.IMPLEMENTING):
+    # Advance the stub past the agent states to TESTING (bypassing their
+    # agent semantics — this test only proves the stub fallthrough).
+    for target in (
+        TaskStatus.PLANNING,
+        TaskStatus.RESEARCHING,
+        TaskStatus.IMPLEMENTING,
+        TaskStatus.TESTING,
+    ):
         transition_task(db_session, task, target)
     db_session.commit()
 
@@ -100,6 +109,6 @@ def test_non_planning_states_use_stub_and_never_call_planner(db_session, repo_ta
     planner = PlanningAgent(provider)
     new_status = run(advance_task_with_agents(db_session, task.id, planner=planner))
 
-    assert new_status is TaskStatus.TESTING  # stub IMPLEMENTING -> TESTING
+    assert new_status is TaskStatus.REVIEWING  # stub TESTING -> REVIEWING
     assert provider.structured_calls == []  # planner never invoked
     assert not db_session.scalars(select(Plan)).all()  # no plan persisted

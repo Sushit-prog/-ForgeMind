@@ -28,6 +28,17 @@ Current milestone scope:
   against what the loop actually observed. RESEARCHING → IMPLEMENTING fires only after the
   artifact is persisted. Read-only is enforced structurally (a write proposal is DENIED and
   audited, never "just tried"); file content and git output are DATA, not instructions.
+- **Phase 7 — Developer Agent**: the first write-capable agent. A bounded tool-use loop that
+  reads (grounded in the research artifact, but free to explore further), writes via
+  `filesystem.write_file` (the Phase-4 traversal defense reused, not reimplemented), commits
+  EXACTLY ONCE via `git.commit`, and ends with a schema-validated `ImplementationSummary` whose
+  `files_changed` is cross-checked against the files actually written. The one-commit contract
+  is enforced structurally — after the first commit, further writes/commits are denied — so the
+  commit provably represents the full change. Zero commits is a HARD failure (an INCOMPLETE
+  marker row, Phase 5's INVALID-plan pattern), never forced synthesis. A DENIED/unknown tool
+  result is unexpected here and audited as `developer.unexpected_denial` (distinct from
+  Research's expected-denial case). Capabilities exclude `shell.*`/`github.*` — verification
+  is a later phase's job. IMPLEMENTING → TESTING fires only after the summary is persisted.
 
 ## Quick start
 
@@ -72,9 +83,11 @@ curl localhost:8000/health               # {"status": "ok"}
 
 ```bash
 pytest              # hermetic suite (SQLite, no services) — state machine, lifecycle, API,
-                    # policy engine, path traversal, git runtime, planner, research agent
+                    # policy engine, path traversal (read + write), git runtime, planner,
+                    # research + developer agents
 pytest tests_e2e/   # end-to-end (needs Postgres + Redis up) — real worker pipeline, cancel,
-                    # crash recovery (kill/restart), two-worker concurrency, research loop
+                    # crash recovery (kill/restart), two-worker concurrency, research + developer
+                    # loops
 ```
 
 Note: `tests_e2e/` spawns its OWN worker subprocesses on the same Postgres/Redis, so stop the
@@ -91,6 +104,8 @@ app/
                             DAG validation, retry-once, persistence
     researcher/             ResearchAgent: bounded tool-use loop (read-only), ResearchArtifact
                             schema + grounding cross-check, forced synthesis on budget exhaustion
+    developer/              DeveloperAgent: bounded write-capable loop, one-commit contract,
+                            ImplementationSummary schema + files-changed cross-check
   api/routes/tasks.py       Task API: create/list/get/cancel/events
   capabilities/             Capability value objects + per-agent assignment (Section H)
   database/                 engine/session + Alembic migrations
@@ -108,16 +123,18 @@ app/
   policies/                 deterministic PolicyEngine + risk-default & explicit-deny rules
   repository/
     discovery.py            clone-once cache + default-branch/base-commit resolution
-    file_access.py          worktree-scoped read/list/search — traversal-safe
+    file_access.py          worktree-scoped read/list/search/write — traversal-safe
   runtime/
     state_machine.py        Section-D legal-transition table — pure logic, no I/O
     task_lifecycle.py       transitions + events + stub driver + agent transitions
                             (advance_task_with_agents) with compare-and-swap re-check
   schemas/                  Pydantic request/response schemas
-  tools/                    Tool ABC + registry + example tools + repository.* / git.* tools
+  tools/                    Tool ABC + registry + example tools + repository.* / git.* /
+                            filesystem.* tools
   worker/
     queue.py                arq Redis settings + pool + enqueue helper
-    jobs/advance_task.py    one job = one transition (PLANNING/ RESEARCHING run the real agents)
+    jobs/advance_task.py    one job = one transition (PLANNING/RESEARCHING/IMPLEMENTING run
+                            the real agents)
     worker.py               arq entrypoint + startup sweep (crash recovery)
   config.py                 env-driven settings (secrets never hardcoded/logged)
   logging.py                logging setup with URL redaction
@@ -164,6 +181,41 @@ Example tools prove the paths: `example.echo` (executes), `example.read_file`
   system prompt declares them DATA, not instructions. Tests feed injection-style objectives
   and prove the injected payload can never become a persisted plan.
 - **Planner capabilities are structurally empty** — it cannot invoke any tool.
+
+## Developer Agent (Phase 7)
+
+- **Bounded tool-use loop, write-capable**: the LLM proposes ONE tool call per turn
+  (`repository.*`, `filesystem.write_file`, `git.status`/`diff`/`log`/`commit`); the pipeline
+  executes it under the developer's fixed capability set (`repo.read`, `repo.write`, `git.read`,
+  `git.write`); results feed back as `<observation>` DATA; repeat up to
+  `MAX_DEVELOPER_TOOL_CALLS` (default 20). A `{"final": true}` response ends the loop and the
+  runtime asks for the `ImplementationSummary`.
+- **One commit per run, enforced structurally**: after the first successful `git.commit`, any
+  further `filesystem.write_file`/`git.commit` proposal is denied at the agent level (audited
+  `developer.post_commit_proposal`) — so the single commit provably represents the full change
+  and no uncommitted residue can accumulate. (Chosen over allow-and-squash: squashing needs
+  fragile history surgery; structural enforcement gives a Reviewer one unambiguous commit.)
+- **Zero commits = hard failure**: an LLM that says `final` (or exhausts the budget) without
+  committing raises, the task goes FAILED, and an explicit INCOMPLETE marker row is persisted
+  (Phase 5's INVALID-plan-row pattern) — an implementation with no commit is nothing, not a
+  degraded-but-usable artifact.
+- **Grounding cross-check**: the summary's `files_changed` must match the files ACTUALLY
+  written by `filesystem.write_file` during the loop (same accept-with-warning-after-one-retry
+  policy as Phase 6, applied to writes — the committed diff is verifiable ground truth
+  downstream). Unexplained divergences from `research.relevant_files` are prompted once
+  (`deviations_from_research`), then accepted with a loud audit if the LLM still stays silent.
+- **Write-path security**: `filesystem.write_file` reuses `FileAccess._resolve` — the exact
+  Phase-4 containment check — so a `../` climb, absolute path, or symlink escape is rejected
+  before anything is written, with its own adversarial test.
+- **Unexpected denials are loud**: the developer holds every capability it legitimately needs,
+  so a pipeline DENIED result or an unknown `shell.*`/`github.*` proposal is audited as
+  `developer.unexpected_denial` — distinct from Research's expected-denial case. The capability
+  boundary (no `shell.*`, no `github.*`) is verified adversarially.
+- **Empty-diff commits are handled, not looped**: `git.commit` refuses empty trees (Phase 4);
+  the refusal is a FAILED observation the loop survives — never an infinite retry.
+- **Research is a hypothesis, not ground truth**: findings are handed over with an explicit
+  disclaimer, and the developer may explore beyond `relevant_files` — as long as it explains
+  the divergence.
 
 ## Research Agent (Phase 6)
 
@@ -219,13 +271,15 @@ its last persisted status; the worker's startup sweep re-enqueues it from there.
 Tables (architecture doc section G, milestone scope): `tasks`, `plans` (incl.
 `raw_llm_output`), `plan_steps`, `task_steps`, `capabilities`, `policies`, `audit_logs`,
 `repositories` (incl. `local_clone_path`), `worktrees`, `execution_events`, `tool_calls`,
-`research_artifacts`. Remaining Section-G tables arrive with the phases that use them
-(agents/eval). Tasks default to a bounded replan budget (`max_replans=3`) — Section D's
-"budget exhausted → ESCALATED" is enforced even when the API client sets no budget.
+`research_artifacts`, `implementation_summaries`. Remaining Section-G tables arrive with the
+phases that use them (agents/eval). Tasks default to a bounded replan budget
+(`max_replans=3`) — Section D's "budget exhausted → ESCALATED" is enforced even when the API
+client sets no budget.
 
 ## Security posture
 
 - Secrets come from `.env` only; connection strings are logged redacted.
 - Startup fails fast if the DB is unreachable — no silent hangs.
 - The worker uses the same env-driven config as the API — no new secret surface.
-- No shell execution, no file writes outside the repo, no external network calls yet.
+- No shell execution; file writes are confined to the task's worktree (traversal-rejected),
+  never outside the repo; no external network calls yet.

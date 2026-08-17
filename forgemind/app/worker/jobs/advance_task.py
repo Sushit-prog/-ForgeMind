@@ -2,12 +2,13 @@
 
 One job = at most one state transition. PLANNING runs the real Planning
 Agent (LLM call, persisted plan); RESEARCHING runs the real Research
-Agent (bounded tool-use loop, persisted artifact); every other state uses
-the stub driver. The transition is applied atomically under a row lock;
-if it succeeds the job re-enqueues itself so the pipeline keeps moving.
-Illegal transitions are caught, logged, and never silently applied. A
-crash between the commit and the re-enqueue is healed by the worker's
-startup sweep (Section J).
+Agent (bounded tool-use loop, persisted artifact); IMPLEMENTING runs the
+real Developer Agent (bounded tool-use loop, one commit, persisted
+summary); every other state uses the stub driver. The transition is
+applied atomically under a row lock; if it succeeds the job re-enqueues
+itself so the pipeline keeps moving. Illegal transitions are caught,
+logged, and never silently applied. A crash between the commit and the
+re-enqueue is healed by the worker's startup sweep (Section J).
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 _planner = None
 _researcher = None
+_developer = None
 
 
 def _get_planner():
@@ -59,6 +61,21 @@ def _get_researcher():
     return _researcher
 
 
+def _get_developer():
+    """Lazily-built developer (real OpenRouter or stub). None when
+    unconfigured — IMPLEMENTING tasks then fail cleanly instead of hanging."""
+    global _developer
+    if _developer is None:
+        try:
+            from app.agents.developer.agent import build_developer
+
+            _developer = build_developer()
+        except Exception as exc:  # noqa: BLE001 — unconfigured provider
+            logger.warning("Developer unavailable (%s); IMPLEMENTING tasks will fail", exc)
+            _developer = None
+    return _developer
+
+
 async def advance_task(ctx: dict, task_id: str) -> None:
     """Load the task, apply the next legal transition, persist, re-enqueue."""
     # Test/ops knob: simulate slow transitions so crash windows are observable.
@@ -70,7 +87,7 @@ async def advance_task(ctx: dict, task_id: str) -> None:
     db = SessionLocal()
     try:
         new_status = await advance_task_with_agents(
-            db, task_uuid, _get_planner(), _get_researcher()
+            db, task_uuid, _get_planner(), _get_researcher(), _get_developer()
         )
     except IllegalTransitionError as exc:
         # Deterministic guard fired: log loudly, never silently update status.

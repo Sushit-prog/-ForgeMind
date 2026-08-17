@@ -78,13 +78,54 @@ RESEARCH_ARTIFACT_RESPONSE = json.dumps(
     }
 )
 
+# --- developer agent canned responses (Phase 7) ------------------------------
+# The write bumps src/app.py ("VALUE = 1" -> "VALUE = 2"), the commit captures
+# it, and the summary reports exactly the file that was written, so the
+# files-changed cross-check stays grounded.
+
+WRITE_PROPOSAL = json.dumps(
+    {
+        "tool_call": {
+            "tool": "filesystem.write_file",
+            "input": {"path": "src/app.py", "content": "VALUE = 2\n"},
+        }
+    }
+)
+COMMIT_PROPOSAL = json.dumps(
+    {"tool_call": {"tool": "git.commit", "input": {"message": "fix: bump VALUE to 2"}}}
+)
+IMPLEMENTATION_SUMMARY_RESPONSE = json.dumps(
+    {
+        "files_changed": ["src/app.py"],
+        "summary": "Updated VALUE to 2 in src/app.py per the research hypothesis.",
+        "tests_added": [],
+        "deviations_from_research": None,
+    }
+)
+
 
 def default_by_schema(flaky_planner: bool = False) -> dict[str, list[str]]:
-    """The worker's default per-schema script (planner + research)."""
+    """The worker's default per-schema script (planner + research + developer).
+
+    ``ToolCallProposal`` is one shared queue consumed in order: research takes
+    the first two (search, final), developer takes the next three (write,
+    commit, final)."""
+    plan_queue = (
+        [MALFORMED_RESPONSE, DEFAULT_PLAN_RESPONSE]
+        if flaky_planner
+        else [DEFAULT_PLAN_RESPONSE]
+    )
     return {
-        "Plan": [MALFORMED_RESPONSE, DEFAULT_PLAN_RESPONSE] if flaky_planner else [DEFAULT_PLAN_RESPONSE],
-        "ToolCallProposal": [SEARCH_PROPOSAL, FINAL_PROPOSAL],
+        "Plan": plan_queue,
+        "ToolCallProposal": [
+            SEARCH_PROPOSAL,
+            FINAL_PROPOSAL,
+            WRITE_PROPOSAL,
+            COMMIT_PROPOSAL,
+            FINAL_PROPOSAL,
+        ],
         "ResearchArtifact": [RESEARCH_ARTIFACT_RESPONSE],
+        "ImplementationSummaryDraft": [IMPLEMENTATION_SUMMARY_RESPONSE],
     }
 
 

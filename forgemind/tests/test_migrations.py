@@ -25,6 +25,8 @@ EXPECTED_TABLES = {
     "audit_logs",
     "repositories",
     "worktrees",
+    "research_artifacts",
+    "implementation_summaries",
 }
 
 

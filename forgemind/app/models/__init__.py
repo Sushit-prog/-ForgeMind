@@ -14,6 +14,7 @@ from app.models.base import Base, JsonType
 from app.models.audit import AuditLog
 from app.models.capability import Capability
 from app.models.execution_event import ExecutionEvent
+from app.models.implementation_summary import ImplementationSummary
 from app.models.plan import Plan, PlanStep
 from app.models.policy import Policy
 from app.models.repository import Repository, Worktree
@@ -26,6 +27,7 @@ __all__ = [
     "Base",
     "Capability",
     "ExecutionEvent",
+    "ImplementationSummary",
     "JsonType",
     "Plan",
     "PlanStep",

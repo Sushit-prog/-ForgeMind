@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     max_research_tool_calls: int = Field(
         default=10, description="Max tool calls per research run (env: MAX_RESEARCH_TOOL_CALLS)."
     )
+    # Developer agent (Phase 7): hard cap on tool calls per task. Exhausting
+    # the budget with no commit is a hard failure (not forced synthesis) — an
+    # implementation without a commit is nothing.
+    max_developer_tool_calls: int = Field(
+        default=20, description="Max tool calls per developer run (env: MAX_DEVELOPER_TOOL_CALLS)."
+    )
 
 
 @lru_cache

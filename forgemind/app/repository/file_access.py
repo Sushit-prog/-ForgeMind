@@ -70,6 +70,20 @@ class FileAccess:
             raise FileNotFoundError(f"not a file in worktree: {relative_path}")
         return path.read_text(encoding="utf-8", errors="replace")
 
+    def write_file(self, relative_path: str, content: str) -> bool:
+        """Write ``content`` to ``relative_path`` inside the root.
+
+        Uses the EXACT same ``_resolve`` containment check as reads — a
+        write can never escape the worktree any more than a read can. The
+        target may be a new file (parents are created) or an existing one;
+        returns True if the file already existed before the write.
+        """
+        path = self._resolve(relative_path)
+        existed = path.is_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return existed
+
     def list_files(self, relative_dir: str = ".") -> list[str]:
         base = self._root if relative_dir in ("", ".") else self._resolve(relative_dir)
         if not base.is_dir():
