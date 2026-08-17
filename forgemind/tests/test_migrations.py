@@ -27,6 +27,9 @@ EXPECTED_TABLES = {
     "worktrees",
     "research_artifacts",
     "implementation_summaries",
+    "test_runs",
+    "failures",
+    "failure_classifications",
 }
 
 

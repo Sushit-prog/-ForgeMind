@@ -14,12 +14,14 @@ from app.models.base import Base, JsonType
 from app.models.audit import AuditLog
 from app.models.capability import Capability
 from app.models.execution_event import ExecutionEvent
+from app.models.failure import FailureClassification
 from app.models.implementation_summary import ImplementationSummary
 from app.models.plan import Plan, PlanStep
 from app.models.policy import Policy
 from app.models.repository import Repository, Worktree
 from app.models.research_artifact import ResearchArtifact
 from app.models.task import Task, TaskStatus, TaskStep
+from app.models.test_run import Failure, TestRun
 from app.models.tool_call import ToolCall, ToolCallStatus
 
 __all__ = [
@@ -27,6 +29,8 @@ __all__ = [
     "Base",
     "Capability",
     "ExecutionEvent",
+    "Failure",
+    "FailureClassification",
     "ImplementationSummary",
     "JsonType",
     "Plan",
@@ -37,6 +41,7 @@ __all__ = [
     "Task",
     "TaskStatus",
     "TaskStep",
+    "TestRun",
     "ToolCall",
     "ToolCallStatus",
     "Worktree",

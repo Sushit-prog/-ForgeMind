@@ -141,19 +141,27 @@ class DeveloperAgent(Agent):
     # -- the public contract -------------------------------------------------
 
     async def run(
-        self, task: Task, plan_step, research, ctx: ExecutionContext
+        self,
+        task: Task,
+        plan_step,
+        research,
+        ctx: ExecutionContext,
+        fix_instruction: str | None = None,
     ) -> ImplementationSummary:
         """Tool-use loop: read -> write -> commit ONCE -> grounded summary.
 
         Bounded by ``max_tool_calls``. Must produce at least one commit
         before emitting a summary — zero commits is a hard failure.
+        ``fix_instruction`` (Phase 8) is the Debugger's concrete
+        re-implementation instruction when this run is a replan after a
+        failed test run — handed to the model as DATA.
         """
         if ctx.db is None:
             raise DeveloperError("ExecutionContext.db is required for implementation")
         db = ctx.db
 
         worktree = self._ensure_worktree(db, task)
-        messages = build_developer_messages(task, plan_step, research)
+        messages = build_developer_messages(task, plan_step, research, fix_instruction)
         observations: list[Observation] = []
         commit_sha: str | None = None
         committed = False

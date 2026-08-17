@@ -100,7 +100,15 @@ def db_session():
 
 @pytest.fixture()
 def source_repo(tmp_path):
-    """A real throwaway git repo (Phase 4 git-runtime tests)."""
+    """A real throwaway git repo (Phase 4 git-runtime tests).
+
+    Since Phase 8, TESTING runs the repo's REAL configured test command
+    against the worktree, so the fixture carries a genuine pytest suite:
+    a test that FAILS on the initial state (VALUE = 1) and PASSES after the
+    stub developer writes VALUE = 2 — the full pipeline can then reach
+    COMPLETED through a real subprocess test run. ``pyproject.toml`` is the
+    detection marker that makes discovery store ``test_command = pytest``.
+    """
     from app.git.runner import run_git
 
     repo = tmp_path / "source"
@@ -109,6 +117,16 @@ def source_repo(tmp_path):
     (repo / "README.md").write_text("# Fixture Repo\n")
     (repo / "src").mkdir()
     (repo / "src" / "app.py").write_text("VALUE = 1\n")
+    (repo / "pyproject.toml").write_text(
+        "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n"
+    )
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_app.py").write_text(
+        "from pathlib import Path\n\n\n"
+        "def test_value_is_two() -> None:\n"
+        "    content = Path(\"src/app.py\").read_text()\n"
+        "    assert \"VALUE = 2\" in content\n"
+    )
     run_git(repo, "add", "-A")
     run_git(repo, "commit", "-m", "initial commit")
     return repo

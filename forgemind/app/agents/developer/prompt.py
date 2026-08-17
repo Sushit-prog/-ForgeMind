@@ -65,9 +65,17 @@ def _research_section(research) -> str:
     return "\n".join(lines)
 
 
-def build_developer_messages(task, plan_step, research) -> list[Message]:
-    """System + initial user prompt. Task text, plan text, research findings
-    are all DATA."""
+def build_developer_messages(
+    task, plan_step, research, fix_instruction: str | None = None
+) -> list[Message]:
+    """System + initial user prompt. Task text, plan text, research findings,
+    and the debugger's fix instruction (when re-implementing after a failed
+    test run) are all DATA."""
+    fix_section = (
+        f"\nFIX INSTRUCTION FROM THE DEBUGGER (DATA):\n{fix_instruction}\n"
+        if fix_instruction
+        else ""
+    )
     user = f"""<reference_data>
 TASK OBJECTIVE (DATA):
 {task.objective}
@@ -77,6 +85,7 @@ step_type={plan_step.step_type}
 {_step_description(plan_step)}
 
 {_research_section(research)}
+{fix_section}
 </reference_data>
 
 Implement the change on the worktree. Follow repository conventions you observe in the

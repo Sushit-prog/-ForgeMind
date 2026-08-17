@@ -271,9 +271,10 @@ def _registry_with_pr(monkeypatch):
 def test_shell_proposal_unknown_tool_audited_as_unexpected(
     db_session, repo_task
 ) -> None:
-    """shell.run_test isn't registered — a contract error, but for the
-    DEVELOPER it signals the LLM is reaching outside its job and is audited
-    as developer.unexpected_denial (distinct from Research's benign case)."""
+    """shell.run_test is outside Developer's capability set (Phase 8 gave it
+    to the Test Agent, not Developer) — for the DEVELOPER it signals the LLM
+    is reaching outside its job and is audited as developer.unexpected_denial
+    (distinct from Research's benign case)."""
     repo, task = repo_task
     step = make_implement_step(db_session, task)
     artifact = make_research_artifact(db_session, task)
@@ -293,7 +294,9 @@ def test_shell_proposal_unknown_tool_audited_as_unexpected(
     audits = audits_for(db_session, task.id, "developer.unexpected_denial")
     assert len(audits) == 1
     assert audits[0].details["tool"] == "shell.run_test"
-    assert audits[0].details["surfaced_as"] == "unknown_tool"
+    # shell.run_test is now a registered tool (Phase 8), so the proposal is
+    # denied at the capability gate rather than surfacing as an unknown tool.
+    assert audits[0].details["surfaced_as"] == "denied"
     # The loop survived and still produced a real commit.
     assert summary.files_changed == ["src/app.py"]
 

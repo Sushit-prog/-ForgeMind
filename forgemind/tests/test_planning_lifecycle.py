@@ -90,12 +90,35 @@ def test_no_planner_fails_task_cleanly(db_session, repo_task) -> None:
 
 
 def test_non_agent_states_use_stub_and_never_call_planner(db_session, repo_task) -> None:
-    """States other than PLANNING/RESEARCHING/IMPLEMENTING (Phase 7) are still
-    stub-driven: they never invoke the planner. TESTING is the next stub state
-    after the real agent states."""
+    """States outside the agent set (Phase 8: TESTING/DEBUGGING are REAL now) are
+    still stub-driven: REVIEWING -> SECURITY_REVIEW never invokes the planner."""
     repo, task = repo_task
-    # Advance the stub past the agent states to TESTING (bypassing their
-    # agent semantics — this test only proves the stub fallthrough).
+    # Advance past the agent states to REVIEWING (bypassing their agent
+    # semantics — this test only proves the stub fallthrough for the states
+    # that are STILL stubs).
+    for target in (
+        TaskStatus.PLANNING,
+        TaskStatus.RESEARCHING,
+        TaskStatus.IMPLEMENTING,
+        TaskStatus.TESTING,
+        TaskStatus.REVIEWING,
+    ):
+        transition_task(db_session, task, target)
+    db_session.commit()
+
+    provider = StubLLMProvider()
+    planner = PlanningAgent(provider)
+    new_status = run(advance_task_with_agents(db_session, task.id, planner=planner))
+
+    assert new_status is TaskStatus.SECURITY_REVIEW  # stub REVIEWING -> SECURITY_REVIEW
+    assert provider.structured_calls == []  # planner never invoked
+    assert not db_session.scalars(select(Plan)).all()  # no plan persisted
+
+
+def test_testing_without_tester_fails_cleanly(db_session, repo_task) -> None:
+    """Phase 8: TESTING is a REAL state — with no tester agent it fails
+    cleanly (never the old stub happy-path hop to REVIEWING)."""
+    repo, task = repo_task
     for target in (
         TaskStatus.PLANNING,
         TaskStatus.RESEARCHING,
@@ -109,6 +132,7 @@ def test_non_agent_states_use_stub_and_never_call_planner(db_session, repo_task)
     planner = PlanningAgent(provider)
     new_status = run(advance_task_with_agents(db_session, task.id, planner=planner))
 
-    assert new_status is TaskStatus.REVIEWING  # stub TESTING -> REVIEWING
-    assert provider.structured_calls == []  # planner never invoked
-    assert not db_session.scalars(select(Plan)).all()  # no plan persisted
+    assert new_status is TaskStatus.FAILED
+    db_session.expire_all()
+    assert db_session.get(Task, task.id).status == "FAILED"
+    assert events_for(db_session, task.id)[-1].reason == "no_tester_agent"

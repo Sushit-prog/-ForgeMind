@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     llm_model_planner: str | None = Field(
         default=None, description="Model for the planning agent (env: LLM_MODEL_PLANNER)."
     )
+    llm_model_debugger: str | None = Field(
+        default=None, description="Model for the debugger agent (env: LLM_MODEL_DEBUGGER)."
+    )
     llm_timeout_seconds: float = Field(default=60.0, description="Per-LLM-call timeout.")
     llm_max_retries: int = Field(
         default=2, description="Bounded transient (timeout/5xx) retries per call."
@@ -88,6 +91,17 @@ class Settings(BaseSettings):
     # implementation without a commit is nothing.
     max_developer_tool_calls: int = Field(
         default=20, description="Max tool calls per developer run (env: MAX_DEVELOPER_TOOL_CALLS)."
+    )
+    # Debugger agent (Phase 8): hard cap on investigation tool calls per task
+    # before a forced classification.
+    max_debugger_tool_calls: int = Field(
+        default=10, description="Max tool calls per debugger run (env: MAX_DEBUGGER_TOOL_CALLS)."
+    )
+    # shell.run_test (Phase 8): hard timeout on the test subprocess. A hung
+    # suite times out into status "error" (never "failed") so the Debugger
+    # can tell a hang from a clean failing exit code.
+    test_timeout_seconds: float = Field(
+        default=300.0, description="Timeout for the test subprocess (env: TEST_TIMEOUT_SECONDS)."
     )
 
 

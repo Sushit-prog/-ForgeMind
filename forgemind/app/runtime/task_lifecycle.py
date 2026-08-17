@@ -7,14 +7,15 @@
 - ``advance_task_once`` is the worker's unit of work: SELECT ... FOR UPDATE,
   compute the next stub transition, apply it, commit. Row-level locking
   serializes concurrent workers (Section D / edge cases).
-- ``advance_task_with_agents`` routes PLANNING/RESEARCHING/IMPLEMENTING
-  through the real Planning/Research/Developer agents; every other state
-  falls through to the stub driver.
-- ``next_status`` is still the *stub* transition decision for the non-agent
-  states. For IMPLEMENTING the successor is deterministic (TESTING is the
-  state machine's only legal success next state), so this is not yet a
-  hardcoded happy-path choice; the real decision stub is TESTING's
-  pass/fail branching, which arrives with the Test Agent in Phase 8.
+- ``advance_task_with_agents`` routes PLANNING/RESEARCHING/IMPLEMENTING/
+  TESTING/DEBUGGING through the real Planning/Research/Developer/Test/
+  Debugger agents; every other state falls through to the stub driver.
+- ``next_status`` remains the *stub* decision for the remaining non-agent
+  states only. TESTING's pass/fail branching and DEBUGGING's
+  fixable/flaky/unfixable branching are REAL (Phase 8): TESTING branches
+  passed -> REVIEWING / failed|error -> DEBUGGING; DEBUGGING branches
+  flaky -> REVIEWING / unfixable -> FAILED / fixable -> IMPLEMENTING with
+  the replan budget enforced at the transition.
 """
 
 from __future__ import annotations
@@ -189,19 +190,28 @@ async def advance_task_with_agents(
     planner=None,
     researcher=None,
     developer=None,
+    tester=None,
+    debugger=None,
 ) -> TaskStatus | None:
-    """Worker unit of work (Phases 5-7): the LLM states run the real agents.
+    """Worker unit of work (Phases 5-8): the real states run the real agents.
 
-    - PLANNING: run ``planner.run``; RESEARCHING: run ``researcher.run``;
-      IMPLEMENTING: run ``developer.run`` with the persisted plan's implement
-      step + the latest research artifact. Each persists its artifact, and
-      the transition to the next state fires only after persistence. On
-      failure the task goes FAILED (never ESCALATED — reserved for
-      replan-budget exhaustion), with the reason on the execution event.
+    - PLANNING -> ``planner``; RESEARCHING -> ``researcher``; IMPLEMENTING
+      -> ``developer`` (real commit + grounded summary); TESTING -> the
+      deterministic ``tester`` (real subprocess run of the configured test
+      command, Section 41: no LLM judgment); DEBUGGING -> ``debugger``
+      (read-only investigation + classification, with the flakiness re-run).
+      Each persists its artifact and the transition fires only after
+      persistence. On failure the task goes FAILED (never ESCALATED —
+      reserved for replan-budget exhaustion), with the reason on the event.
+    - TESTING branches for real: passed -> REVIEWING; failed/error ->
+      DEBUGGING. DEBUGGING branches for real: flaky -> REVIEWING;
+      unfixable -> FAILED with the category; fixable -> IMPLEMENTING with
+      replan_count+1 (checked against max_replans — exhausted -> ESCALATED).
     - every other state: identical to the stub ``advance_task_once``.
 
-    ``planner``/``researcher``/``developer`` may be None (no provider
-    configured) — the task then fails cleanly instead of hanging.
+    ``planner``/``researcher``/``developer``/``tester``/``debugger`` may be
+    None (no provider configured) — the task then fails cleanly instead of
+    hanging.
     """
     task = db.execute(
         select(Task).where(Task.id == task_id).with_for_update()
@@ -217,6 +227,10 @@ async def advance_task_with_agents(
         return await _run_researching(db, task, researcher)
     if current is TaskStatus.IMPLEMENTING:
         return await _run_implementing(db, task, developer)
+    if current is TaskStatus.TESTING:
+        return await _run_testing(db, task, tester)
+    if current is TaskStatus.DEBUGGING:
+        return await _run_debugging(db, task, debugger)
     return advance_task_once(db, task_id)
 
 
@@ -370,6 +384,7 @@ async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
 
     from app.agents.developer.agent import DeveloperError
     from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
+    from app.models import FailureClassification as ClassificationRow
     from app.models import Plan as PlanRow
     from app.models import PlanStep as PlanStepRow
     from app.models import ResearchArtifact as ArtifactRow
@@ -403,9 +418,22 @@ async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
             db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "no_research_artifact"
         )
 
+    # A replan after debugging carries the Debugger's concrete fix instruction
+    # (Phase 8) — the developer receives it as DATA for its next run. The
+    # latest classification is the one that routed us back to IMPLEMENTING.
+    fix_instruction = None
+    classification = db.scalar(
+        select(ClassificationRow).where(ClassificationRow.task_id == task.id)
+        .order_by(ClassificationRow.created_at.desc()).limit(1)
+    )
+    if classification is not None and classification.fix_instruction:
+        fix_instruction = classification.fix_instruction
+
     ctx = ExecutionContext(task_id=task.id, agent_type="developer", db=db)
     try:
-        await developer.run(task, implement_step, artifact, ctx)
+        await developer.run(
+            task, implement_step, artifact, ctx, fix_instruction=fix_instruction
+        )
     except DeveloperError as exc:
         logger.error("Task %s implementation failed: %s", task.id, exc)
         return _cas_transition(
@@ -425,3 +453,186 @@ async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
     return _cas_transition(
         db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.TESTING, "implementation_persisted"
     )
+
+
+async def _run_testing(db: Session, task: Task, tester) -> TaskStatus:
+    """TESTING (Phase 8): run the real test command, branch for real.
+
+    The Test Agent is deterministic (Section 41): one ``shell.run_test``
+    against the repository's configured test command, exit code + structured
+    parser — no LLM judgment call. Branching is now REAL, not a stub:
+
+    - ``passed`` -> REVIEWING (the state machine's only legal success
+      successor from TESTING).
+    - ``failed`` / ``error`` -> DEBUGGING. ``error`` (timeout, no tests
+      collected, no configured test_command) is deliberately distinct from
+      ``failed`` so the Debugger can tell a hung suite from a clean failing
+      exit code.
+    """
+    if tester is None:
+        logger.error("Task %s in TESTING but no tester agent", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.TESTING, TaskStatus.FAILED, "no_tester_agent"
+        )
+
+    from app.agents.tester.agent import TestError
+    from app.git.worktree_manager import WorktreeManager
+    from app.tools.base import ExecutionContext
+
+    ctx = ExecutionContext(task_id=task.id, agent_type="tester", db=db)
+    try:
+        worktree = WorktreeManager(db).get_or_create_for_task(task)
+        result = await tester.run(task, worktree, ctx)
+    except TestError as exc:
+        logger.error("Task %s testing failed: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.TESTING, TaskStatus.FAILED, "testing_failed"
+        )
+    except Exception:  # noqa: BLE001 — never hang, never silently continue
+        logger.exception("Task %s tester crashed", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.TESTING, TaskStatus.FAILED, "testing_error"
+        )
+
+    if result.status == "passed":
+        logger.info(
+            "Task %s -> REVIEWING (tests passed: %d passed, %dms)",
+            task.id, result.passed, result.duration_ms,
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.TESTING, TaskStatus.REVIEWING, "tests_passed"
+        )
+    logger.info(
+        "Task %s -> DEBUGGING (tests %s: %d failed)",
+        task.id, result.status, result.failed,
+    )
+    return _cas_transition(
+        db, task.id, TaskStatus.TESTING, TaskStatus.DEBUGGING, f"tests_{result.status}"
+    )
+
+
+async def _run_debugging(db: Session, task: Task, debugger) -> TaskStatus:
+    """DEBUGGING (Phase 8): classify the failure, branch for real.
+
+    The Debugger investigates the failing run (read-only), re-runs the
+    suite ONCE via the Test Agent to OBSERVE flakiness rather than guess it,
+    and produces a persisted ``FailureClassification``. Branching:
+
+    - ``is_flaky`` -> REVIEWING — treated as if TESTING had passed (Section
+      10); the flaky result stays on the trace, never swept away.
+    - ``fixable == False`` -> FAILED with the category attached — an
+      environment/dependency failure is not something re-running the
+      Developer fixes.
+    - fixable -> IMPLEMENTING with ``replan_count`` + 1, enforced at the
+      TRANSITION (the Developer never learns about budgets) and checked
+      against ``max_replans``: exhausted -> ESCALATED, not another attempt.
+    """
+    if debugger is None:
+        logger.error("Task %s in DEBUGGING but no debugger agent", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED, "no_debugger_agent"
+        )
+
+    from app.agents.debugger.agent import DebuggerError
+    from app.agents.tester.schema import result_from_row
+    from app.llm.errors import LLMMalformedOutputError, LLMTimeoutError
+    from app.models import ImplementationSummary as SummaryRow
+    from app.models import TestRun
+    from app.tools.base import ExecutionContext
+
+    run = db.scalar(
+        select(TestRun).where(TestRun.task_id == task.id)
+        .order_by(TestRun.created_at.desc(), TestRun.id.desc()).limit(1)
+    )
+    if run is None:
+        logger.error("Task %s in DEBUGGING but no test run exists", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED, "no_test_run"
+        )
+    summary = db.scalar(
+        select(SummaryRow).where(SummaryRow.task_id == task.id)
+        .order_by(SummaryRow.created_at.desc()).limit(1)
+    )
+    if summary is None:
+        logger.error(
+            "Task %s in DEBUGGING but no implementation summary exists", task.id
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED, "no_implementation_summary"
+        )
+
+    ctx = ExecutionContext(task_id=task.id, agent_type="debugger", db=db)
+    try:
+        classification = await debugger.run(
+            task, result_from_row(run), summary, ctx
+        )
+    except DebuggerError as exc:
+        logger.error("Task %s debugging failed: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED, "debugger_failed"
+        )
+    except (LLMTimeoutError, LLMMalformedOutputError) as exc:
+        logger.error("Task %s debugger LLM error: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED, "debugger_llm_error"
+        )
+    except Exception:  # noqa: BLE001 — never hang, never silently continue
+        logger.exception("Task %s debugger crashed", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED, "debugger_error"
+        )
+
+    if classification.is_flaky:
+        logger.info(
+            "Task %s -> REVIEWING (flaky test detected, never blocks the pipeline)",
+            task.id,
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.DEBUGGING, TaskStatus.REVIEWING, "flaky_test"
+        )
+    if not classification.fixable:
+        logger.info(
+            "Task %s -> FAILED (unfixable %s: %s)",
+            task.id, classification.category, classification.root_cause[:200],
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED,
+            f"unfixable:{classification.category}",
+        )
+
+    # Fixable: bounded replan. The budget is enforced HERE at the transition
+    # (the Developer never sees it), under a fresh row lock — the debugger
+    # committed internally, releasing the job's original FOR UPDATE lock.
+    locked = db.execute(
+        select(Task)
+        .where(Task.id == task.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if locked is None:
+        return None
+    if TaskStatus(locked.status) is not TaskStatus.DEBUGGING:
+        logger.info(
+            "Task %s already at %s — skipping DEBUGGING replan transition",
+            task.id, locked.status,
+        )
+        return TaskStatus(locked.status)
+    if locked.max_replans is not None and locked.replan_count >= locked.max_replans:
+        logger.warning(
+            "Task %s replan budget exhausted (%d >= %d) — ESCALATED",
+            task.id, locked.replan_count, locked.max_replans,
+        )
+        transition_task(
+            db, locked, TaskStatus.ESCALATED, reason="replan_budget_exhausted"
+        )
+        db.commit()
+        return TaskStatus.ESCALATED
+    locked.replan_count += 1
+    transition_task(
+        db, locked, TaskStatus.IMPLEMENTING, reason="debugger_replan"
+    )
+    db.commit()
+    logger.info(
+        "Task %s -> IMPLEMENTING (debugger replan #%d)", task.id, locked.replan_count
+    )
+    return TaskStatus.IMPLEMENTING

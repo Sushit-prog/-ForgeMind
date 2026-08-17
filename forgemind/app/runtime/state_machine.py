@@ -48,7 +48,9 @@ def _all_transitions() -> dict[TaskStatus, set[TaskStatus]]:
         TaskStatus.RESEARCHING: {TaskStatus.IMPLEMENTING},
         TaskStatus.IMPLEMENTING: {TaskStatus.TESTING},
         TaskStatus.TESTING: {TaskStatus.DEBUGGING, TaskStatus.REVIEWING},
-        TaskStatus.DEBUGGING: {TaskStatus.IMPLEMENTING},
+        # DEBUGGING -> REVIEWING: a FLAKY_TEST is treated as if TESTING had
+        # passed (Section 10) — flaky failures never block the pipeline.
+        TaskStatus.DEBUGGING: {TaskStatus.IMPLEMENTING, TaskStatus.REVIEWING},
         TaskStatus.REVIEWING: {TaskStatus.SECURITY_REVIEW, TaskStatus.IMPLEMENTING},
         TaskStatus.SECURITY_REVIEW: {TaskStatus.VERIFICATION, TaskStatus.IMPLEMENTING},
         TaskStatus.VERIFICATION: {TaskStatus.PR_CREATION},

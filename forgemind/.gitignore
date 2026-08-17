@@ -12,6 +12,9 @@ venv/
 *.db
 *.sqlite3
 
+# Runtime repo cache / per-task worktrees (Phase 4)
+.forgemind/
+
 # Tooling
 .pytest_cache/
 .coverage

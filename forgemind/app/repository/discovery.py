@@ -28,7 +28,8 @@ class RepositoryDiscovery:
         self.cache_dir = Path(cache_dir or get_settings().repo_cache_dir).resolve()
 
     def clone_if_absent(self, repository: Repository) -> Path:
-        """Return the cached clone path for ``repository``, cloning if needed.
+        """Return the cached clone path for ``repository``, cloning if needed,
+        and ensure the repository has a validated ``test_command``.
 
         A stale/missing cache dir is removed and re-cloned (the row's
         ``local_clone_path`` is the source of truth; a phantom path is
@@ -36,6 +37,11 @@ class RepositoryDiscovery:
         raise ``GitOperationError`` HERE — at discovery time — not three
         steps later.
         """
+        clone_path = self._ensure_clone(repository)
+        self._ensure_test_command(repository, clone_path)
+        return clone_path
+
+    def _ensure_clone(self, repository: Repository) -> Path:
         cached = Path(repository.local_clone_path) if repository.local_clone_path else None
         if cached is not None and cached.is_dir() and run_git_ok(cached, "rev-parse", "--git-dir"):
             return cached
@@ -79,6 +85,36 @@ class RepositoryDiscovery:
         logger.info("Cloned repository %s -> %s", repository.url, clone_path)
         return clone_path
 
+    def _ensure_test_command(self, repository: Repository, clone_path: Path) -> None:
+        """Detect + validate ``repositories.test_command`` at discovery time
+        (Phase 8).
+
+        The command is a SERVER-SIDE value, never agent input: detected from
+        the repo's own setup files (never guessed by an LLM), validated
+        against the ``command_policy`` allowlist HERE — a value that fails
+        validation is rejected loudly and never stored, so nothing that
+        would be blocked at run time ever reaches the runner. When no test
+        setup is detected the field stays None and ``shell.run_test`` fails
+        with a clear message at invocation instead of a confusing
+        subprocess error.
+
+        The clone is ``--no-checkout``, so marker files are read from the
+        git TREE (``git ls-tree``), never from a working directory that
+        does not exist.
+        """
+        if repository.test_command is not None:
+            return
+        command = detect_test_command(clone_path)
+        if command is None:
+            return
+        from app.shell.command_policy import validate_test_command
+
+        validate_test_command(command)  # fails loudly, never stores a bad value
+        repository.test_command = command
+        logger.info(
+            "Detected test_command %r for repository %s", command, repository.url
+        )
+
     def default_branch(self, clone_path: Path) -> str:
         """The remote default branch name (origin/HEAD, then main/master)."""
         try:
@@ -113,6 +149,42 @@ class RepositoryDiscovery:
             "lint_command": repository.lint_command,
             "build_command": repository.build_command,
         }
+
+
+# Marker file -> detected test command. Detection is deterministic and
+# conservative: a marker exists, the command is chosen from a fixed table —
+# nothing here is ever derived from agent/LLM input, and every detected
+# command must pass ``command_policy.validate_test_command`` before it is
+# stored (a rejected command fails discovery loudly, never reaches run time).
+TEST_COMMAND_MARKERS: list[tuple[str, str]] = [
+    ("pyproject.toml", "pytest"),
+    ("pytest.ini", "pytest"),
+    ("tox.ini", "pytest"),
+    ("setup.cfg", "pytest"),
+    ("package.json", "npm test"),
+    ("go.mod", "go test"),
+    ("Cargo.toml", "cargo test"),
+]
+
+
+def detect_test_command(clone_path: Path) -> str | None:
+    """Detect the repository's test command from its setup files.
+
+    The clone is ``--no-checkout``, so markers are read from the git TREE
+    of HEAD, not the filesystem. Returns None when no test setup is present
+    (the repository has no runnable test suite; ``shell.run_test`` then
+    fails with a clear "not configured" message at invocation).
+    """
+    try:
+        listed = run_git(clone_path, "ls-tree", "--name-only", "HEAD").stdout.splitlines()
+    except GitOperationError:
+        logger.warning("test-command detection: cannot list tree of %s", clone_path)
+        return None
+    names = {line.strip() for line in listed}
+    for marker, command in TEST_COMMAND_MARKERS:
+        if marker in names:
+            return command
+    return None
 
 
 def clone_cache_dir_for(repository_id: uuid.UUID, cache_dir: Path) -> Path:

@@ -229,7 +229,29 @@ def build_provider(role: str = "planner"):
         )
     if os.environ.get("FORGEMIND_MOCK_LLM") == "1":
         flaky = os.environ.get("FORGEMIND_MOCK_LLM_FLAKY") == "1"
-        return StubLLMProvider(by_schema=default_by_schema(flaky_planner=flaky, agent=role))
+        retry = None
+        if role == "developer":
+            from app.llm.mock import (
+                COMMIT_PROPOSAL,
+                FINAL_PROPOSAL,
+                WRITE_RETRY_PROPOSAL,
+            )
+
+            # A developer run AFTER a debugging replan receives the debugger's
+            # fix instruction as DATA — the stub then proposes the FIXED write
+            # (mock-only message-keyed queue; real providers respond to the
+            # instruction naturally).
+            retry = {
+                "retry_by_schema": {
+                    "ToolCallProposal": [
+                        WRITE_RETRY_PROPOSAL, COMMIT_PROPOSAL, FINAL_PROPOSAL,
+                    ]
+                },
+                "retry_marker": "FIX INSTRUCTION FROM THE DEBUGGER",
+            }
+        return StubLLMProvider(
+            by_schema=default_by_schema(flaky_planner=flaky, agent=role), **retry or {}
+        )
     raise PlannerConfigError(
         "no LLM provider configured: set OPENROUTER_API_KEY (and LLM_MODEL_PLANNER) "
         "or FORGEMIND_MOCK_LLM=1 for key-less development"

@@ -4,15 +4,16 @@ from app.tools.filesystem_tools import FILESYSTEM_TOOLS
 from app.tools.git_tools import GIT_TOOLS
 from app.tools.registry import DuplicateToolError, ToolNotFoundError, ToolRegistry
 from app.tools.repository_tools import REPOSITORY_TOOLS
+from app.tools.shell_tools import SHELL_TOOLS
 
 
 def build_runtime_registry() -> ToolRegistry:
-    """The full Phase-4 registry: example tools + repository.* + git.* +
-    filesystem.* (Phase 7). Real tools (shell.*, github.*) register the
-    same way in later phases.
+    """The full registry: example tools + repository.* + git.* +
+    filesystem.* (Phase 7) + shell.* (Phase 8). Real github.* tools
+    register the same way in later phases.
     """
     registry = build_default_registry()
-    for tool in (*REPOSITORY_TOOLS, *GIT_TOOLS, *FILESYSTEM_TOOLS):
+    for tool in (*REPOSITORY_TOOLS, *GIT_TOOLS, *FILESYSTEM_TOOLS, *SHELL_TOOLS):
         registry.register(tool)
     return registry
 

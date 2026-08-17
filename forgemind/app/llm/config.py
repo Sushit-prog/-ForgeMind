@@ -14,6 +14,7 @@ from app.config import get_settings
 # role -> settings field that carries the model (env: LLM_MODEL_<ROLE>).
 _ROLE_MODEL_FIELDS = {
     "planner": "llm_model_planner",
+    "debugger": "llm_model_debugger",
 }
 
 

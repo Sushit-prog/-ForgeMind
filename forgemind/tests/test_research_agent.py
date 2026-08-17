@@ -183,7 +183,7 @@ def test_unknown_tool_proposal_becomes_failed_observation_not_crash(
     step = make_plan_step(db_session, task)
 
     ghost_proposal = json.dumps(
-        {"tool_call": {"tool": "shell.run_test", "input": {}}}
+        {"tool_call": {"tool": "shell.evil", "input": {}}}
     )
     provider = StubLLMProvider(
         by_schema={

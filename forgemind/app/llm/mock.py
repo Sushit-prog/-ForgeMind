@@ -103,34 +103,73 @@ IMPLEMENTATION_SUMMARY_RESPONSE = json.dumps(
     }
 )
 
+# --- debugger agent canned responses (Phase 8) ------------------------------
+# The debugger investigates (reads src/app.py), then classifies the failure
+# as CODE_FAILURE — fixable, with a CONCRETE instruction. The fix instruction
+# text doubles as the mock's retry marker: the developer's NEXT run (which
+# receives this text as DATA) then writes the FIXED value (3) instead of the
+# original (2), which is what makes the fail-once-then-pass scenario work
+# end to end with canned responses.
+
+DEBUGGER_READ_PROPOSAL = json.dumps(
+    {"tool_call": {"tool": "repository.read_file", "input": {"path": "src/app.py"}}}
+)
+FIX_INSTRUCTION = "Update src/app.py so VALUE equals 3."
+FAILURE_CLASSIFICATION_RESPONSE = json.dumps(
+    {
+        "category": "CODE_FAILURE",
+        "root_cause": "The test expects VALUE to equal 3 but the implementation sets it to 2.",
+        "fix_instruction": FIX_INSTRUCTION,
+        "fixable": True,
+    }
+)
+
+# The developer's retry write — the FIXED value, matching FIX_INSTRUCTION.
+WRITE_RETRY_PROPOSAL = json.dumps(
+    {
+        "tool_call": {
+            "tool": "filesystem.write_file",
+            "input": {"path": "src/app.py", "content": "VALUE = 3\n"},
+        }
+    }
+)
+
+
+def _joined(messages: list[Message] | None) -> str:
+    return "\n".join(m.content for m in (messages or []))
+
 
 def default_by_schema(
     flaky_planner: bool = False, *, agent: str = "research"
 ) -> dict[str, list[str]]:
-    """The worker's default per-schema script (planner + research + developer).
+    """The worker's default per-schema script (planner + research + developer
+    + debugger).
 
     Every agent builds its OWN provider instance in the worker, so the
     ``ToolCallProposal`` queue must be correct for that agent's FIRST tool
     call — research starts with a search (then final), the developer starts
-    with a write (then commit, then final). A developer run whose first
-    proposal is a search (or final) would burn the whole run without
-    committing — a hard failure, not a recoverable probe.
+    with a write (then commit, then final), the debugger starts with a read
+    (then final). A developer run whose first proposal is a search (or
+    final) would burn the whole run without committing — a hard failure,
+    not a recoverable probe.
     """
     plan_queue = (
         [MALFORMED_RESPONSE, DEFAULT_PLAN_RESPONSE]
         if flaky_planner
         else [DEFAULT_PLAN_RESPONSE]
     )
-    tool_queue = (
-        [WRITE_PROPOSAL, COMMIT_PROPOSAL, FINAL_PROPOSAL]
-        if agent == "developer"
-        else [SEARCH_PROPOSAL, FINAL_PROPOSAL]
-    )
+    if agent == "developer":
+        tool_queue = [WRITE_PROPOSAL, COMMIT_PROPOSAL, FINAL_PROPOSAL]
+    elif agent == "debugger":
+        tool_queue = [DEBUGGER_READ_PROPOSAL, FINAL_PROPOSAL]
+    else:  # research
+        tool_queue = [SEARCH_PROPOSAL, FINAL_PROPOSAL]
     return {
         "Plan": plan_queue,
         "ToolCallProposal": tool_queue,
         "ResearchArtifact": [RESEARCH_ARTIFACT_RESPONSE],
         "ImplementationSummaryDraft": [IMPLEMENTATION_SUMMARY_RESPONSE],
+        "FailureClassification": [FAILURE_CLASSIFICATION_RESPONSE],
     }
 
 
@@ -139,6 +178,9 @@ class StubLLMProvider(LLMProvider):
         self,
         responses: list[str] | None = None,
         by_schema: dict[str, list[str]] | None = None,
+        *,
+        retry_by_schema: dict[str, list[str]] | None = None,
+        retry_marker: str | None = None,
     ) -> None:
         self._responses = list(responses) if responses else []
         # Bare constructor (Phase 5 tests) = the default per-schema script.
@@ -147,12 +189,30 @@ class StubLLMProvider(LLMProvider):
         if by_schema is None and not self._responses:
             by_schema = default_by_schema()
         self._by_schema = {name: list(rs) for name, rs in (by_schema or {}).items()}
+        # Message-keyed queues: served INSTEAD of ``by_schema`` when the
+        # prompt contains ``retry_marker`` (mock-only mechanism that lets a
+        # canned agent respond differently to a debugger fix instruction).
+        self._retry_by_schema = {
+            name: list(rs) for name, rs in (retry_by_schema or {}).items()
+        }
+        self._retry_marker = retry_marker
+        self._retry_index: dict[str, int] = {}
         self._index = 0
         self._schema_index: dict[str, int] = {}
         self.generate_calls: list[list[Message]] = []
         self.structured_calls: list[list[Message]] = []
 
-    def _next(self, schema_name: str | None = None) -> str:
+    def _next(self, schema_name: str | None = None, messages: list[Message] | None = None) -> str:
+        if (
+            schema_name
+            and self._retry_marker
+            and schema_name in self._retry_by_schema
+            and self._retry_marker in _joined(messages)
+        ):
+            queue = self._retry_by_schema[schema_name]
+            idx = min(self._retry_index.get(schema_name, 0), len(queue) - 1)
+            self._retry_index[schema_name] = idx + 1
+            return queue[idx]
         if schema_name and schema_name in self._by_schema:
             queue = self._by_schema[schema_name]
             idx = min(self._schema_index.get(schema_name, 0), len(queue) - 1)
@@ -176,5 +236,5 @@ class StubLLMProvider(LLMProvider):
         self, messages: list[Message], schema: type[BaseModel], **kwargs: object
     ) -> BaseModel:
         self.structured_calls.append(messages)
-        raw = self._next(schema.__name__)
+        raw = self._next(schema.__name__, messages)
         return parse_and_validate(raw, schema)

@@ -82,7 +82,7 @@ ILLEGAL_PAIRS = [
     (TaskStatus.COMPLETED, TaskStatus.PLANNING),   # resurrect a finished task
     (TaskStatus.ESCALATED, TaskStatus.RECOVERING),  # escalated is frozen
     (TaskStatus.REPLANNING, TaskStatus.COMPLETED),
-    (TaskStatus.DEBUGGING, TaskStatus.REVIEWING),
+    # NOTE: DEBUGGING -> REVIEWING is legal since Phase 8 (flaky path).
 ]
 
 
