@@ -14,11 +14,18 @@ States (section D):
         -> AWAITING_APPROVAL -> COMPLETED
     TESTING -> DEBUGGING -> IMPLEMENTING            (failures)
     REVIEWING/SECURITY_REVIEW -> IMPLEMENTING        (reject / changes)
-    AWAITING_APPROVAL -> REPLANNING                  (user rejects PR)
+    AWAITING_APPROVAL -> COMPLETED                   (human approves)
+    AWAITING_APPROVAL -> FAILED                      (human rejects — the
+                                                      generic failure path)
     ANY state -> FAILED -> RECOVERING -> REPLANNING  (failure path)
     REPLANNING -> RESEARCHING | IMPLEMENTING         (back into pipeline)
     ANY state -> ESCALATED                           (budget/replans exceeded)
     COMPLETED / ESCALATED are terminal.
+
+FAILED is intentionally terminal for a user REJECT at AWAITING_APPROVAL
+(like user_cancelled): a deliberate stop, not something the system should
+auto-fix by looping back in. AWAITING_APPROVAL is terminal-until-human —
+nothing in the worker ever auto-advances it.
 """
 
 from __future__ import annotations
@@ -59,7 +66,11 @@ def _all_transitions() -> dict[TaskStatus, set[TaskStatus]]:
         # stale, so the pipeline re-tests rather than proceeding.
         TaskStatus.VERIFICATION: {TaskStatus.PR_CREATION, TaskStatus.TESTING},
         TaskStatus.PR_CREATION: {TaskStatus.AWAITING_APPROVAL},
-        TaskStatus.AWAITING_APPROVAL: {TaskStatus.COMPLETED, TaskStatus.REPLANNING},
+        # AWAITING_APPROVAL is terminal-until-human: the worker never moves
+        # it. Only the API approve (-> COMPLETED) / reject (-> FAILED via the
+        # generic failure catch-all below) endpoints transition it. FAILED is
+        # a deliberate stop for a human reject — never REPLANNING.
+        TaskStatus.AWAITING_APPROVAL: {TaskStatus.COMPLETED},
         TaskStatus.COMPLETED: set(),
         TaskStatus.FAILED: {TaskStatus.RECOVERING},
         TaskStatus.RECOVERING: {TaskStatus.REPLANNING},

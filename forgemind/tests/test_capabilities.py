@@ -34,7 +34,7 @@ EXPECTED_ASSIGNMENTS = {
     "debugger": {"repo.read", "git.read"},
     "reviewer": {"repo.read", "git.read"},
     "security": {"repo.read", "git.read"},
-    "github": {"github.read", "github.write"},
+    "github": {"github.read", "github.write", "git.write"},
 }
 
 

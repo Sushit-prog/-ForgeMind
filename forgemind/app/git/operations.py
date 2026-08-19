@@ -94,7 +94,9 @@ class GitOperations:
             parts = line.split("\x1f")
             if len(parts) == 4:
                 commits.append(
-                    CommitInfo(sha=parts[0], author=parts[1], date=parts[2], summary=parts[3])
+                    CommitInfo(
+                        sha=parts[0], author=parts[1], date=parts[2], summary=parts[3]
+                    )
                 )
         return commits
 
@@ -109,6 +111,38 @@ class GitOperations:
         start = self.base_commit or "HEAD"
         run_git(self.path, "branch", name, start)
         return name
+
+    def push(self, fork_url: str, *, token: str | None = None) -> str:
+        """Force-push this worktree's branch to ``fork_url``; return the branch.
+
+        The ONLY push in the system, and it takes the FORK URL explicitly —
+        the caller (the ``git.push`` tool) derives that URL server-side from
+        ``repositories.fork_url`` and refuses when it is unset or identical
+        to the upstream reference, so the upstream is never a push target by
+        construction.
+
+        ``--force`` to the operator's own fork branch is the safe-to-retry
+        idempotency this phase needs (a partial-failure retry may find the
+        branch already exists). HTTPS auth: a PAT is embedded in the push URL
+        as ``x-access-token`` exactly for this invocation — never persisted
+        to a remote config, and the argument list is redacted from error
+        messages so the credential can never reach a log line.
+        """
+        branch = self.status().branch
+
+        url = fork_url
+        if token and url.startswith("https://"):
+            url = url.replace("https://", f"https://x-access-token:{token}@", 1)
+
+        run_git(
+            self.path,
+            "push",
+            "--force",
+            url,
+            f"HEAD:{branch}",
+            redact_args=True,
+        )
+        return branch
 
     def commit(self, message: str) -> str:
         """Stage all changes and commit; return the new commit sha.

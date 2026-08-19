@@ -59,6 +59,7 @@ async def advance_task(ctx: dict, task_id: str) -> None:
     try:
         from app.agents.debugger.agent import build_debugger
         from app.agents.developer.agent import build_developer
+        from app.agents.github_agent.agent import build_github
         from app.agents.planner.agent import build_planner
         from app.agents.researcher.agent import build_researcher
         from app.agents.reviewer.agent import build_reviewer
@@ -79,6 +80,7 @@ async def advance_task(ctx: dict, task_id: str) -> None:
             _build_agent(build_debugger, "Debugger"),
             _build_agent(build_reviewer, "Reviewer"),
             _build_agent(build_security, "Security"),
+            _build_agent(build_github, "GitHub"),
         )
     except IllegalTransitionError as exc:
         # Deterministic guard fired: log loudly, never silently update status.
@@ -97,7 +99,9 @@ async def advance_task(ctx: dict, task_id: str) -> None:
     # committed, so a stale job (task not found, already advanced) cannot
     # kill the worker before it processes the test's own task.
     if new_status is not None and os.environ.get("FORGEMIND_CRASH_AFTER_COMMIT") == "1":
-        logger.warning("FORGEMIND_CRASH_AFTER_COMMIT set — simulating crash after commit")
+        logger.warning(
+            "FORGEMIND_CRASH_AFTER_COMMIT set — simulating crash after commit"
+        )
         os._exit(1)
 
     if new_status is not None and new_status not in TERMINAL_STATES:

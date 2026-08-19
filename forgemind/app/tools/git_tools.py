@@ -63,7 +63,18 @@ class CommitOutput(BaseModel):
     sha: str
 
 
-def _ops_for(ctx: ExecutionContext, worktree_id: uuid.UUID) -> tuple[GitOperations, Worktree]:
+class PushInput(WorktreeInput):
+    pass
+
+
+class PushOutput(BaseModel):
+    branch: str
+    fork_url: str
+
+
+def _ops_for(
+    ctx: ExecutionContext, worktree_id: uuid.UUID
+) -> tuple[GitOperations, Worktree]:
     """Resolve the worktree row + path; tools fail clearly without a DB."""
     if ctx.db is None:
         raise RuntimeError("ExecutionContext.db is required for git tools")
@@ -81,7 +92,9 @@ class StatusTool(Tool):
     capabilities: list[str] = ["git.read"]
     risk = "LOW"
 
-    async def execute(self, input: WorktreeInput, ctx: ExecutionContext) -> StatusOutput:
+    async def execute(
+        self, input: WorktreeInput, ctx: ExecutionContext
+    ) -> StatusOutput:
         ops, _ = _ops_for(ctx, input.worktree_id)
         return StatusOutput(status=ops.status())
 
@@ -123,7 +136,9 @@ class CreateBranchTool(Tool):
     capabilities: list[str] = ["git.write"]
     risk = "MEDIUM"
 
-    async def execute(self, input: CreateBranchInput, ctx: ExecutionContext) -> CreateBranchOutput:
+    async def execute(
+        self, input: CreateBranchInput, ctx: ExecutionContext
+    ) -> CreateBranchOutput:
         ops, _ = _ops_for(ctx, input.worktree_id)
         return CreateBranchOutput(branch=ops.create_branch(input.name))
 
@@ -141,4 +156,55 @@ class CommitTool(Tool):
         return CommitOutput(sha=ops.commit(input.message))
 
 
-GIT_TOOLS: list[Tool] = [StatusTool(), DiffTool(), LogTool(), CreateBranchTool(), CommitTool()]
+class PushTool(Tool):
+    name = "git.push"
+    description = (
+        "Force-push the worktree branch to the repository's FORK "
+        "(repositories.fork_url) — never to the upstream reference. Fails "
+        "closed if no fork is configured."
+    )
+    input_schema = PushInput
+    output_schema = PushOutput
+    capabilities: list[str] = ["git.write"]
+    risk = "MEDIUM"
+
+    async def execute(self, input: PushInput, ctx: ExecutionContext) -> PushOutput:
+        from app.config import get_settings
+        from app.git.errors import SecurityError
+        from app.github.errors import GitHubConfigError
+        from app.models import Repository
+
+        if ctx.db is None:
+            raise RuntimeError("ExecutionContext.db is required for git tools")
+        _, wt = _ops_for(ctx, input.worktree_id)
+        repository = ctx.db.get(Repository, wt.repository_id)
+        if repository is None:
+            raise RuntimeError(f"repository row missing for worktree {wt.id}")
+        # THE fork/upstream split: the push target is repositories.fork_url
+        # and NOTHING else. Unset -> fail closed; identical to the upstream
+        # reference -> SecurityError (a misconfiguration must be loud, never
+        # a silent push to upstream under any condition).
+        fork_url = repository.fork_url
+        if not fork_url:
+            raise GitHubConfigError(
+                "no fork configured for this repository (repositories.fork_url unset) — "
+                "git.push must target a fork, never the upstream"
+            )
+        if fork_url == repository.url:
+            raise SecurityError(
+                "repositories.fork_url must differ from repositories.url — "
+                "pushing to the upstream reference is structurally forbidden"
+            )
+        ops, _ = _ops_for(ctx, input.worktree_id)
+        branch = ops.push(fork_url, token=get_settings().github_token)
+        return PushOutput(branch=branch, fork_url=fork_url)
+
+
+GIT_TOOLS: list[Tool] = [
+    StatusTool(),
+    DiffTool(),
+    LogTool(),
+    CreateBranchTool(),
+    CommitTool(),
+    PushTool(),
+]

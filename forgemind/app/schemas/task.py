@@ -28,6 +28,12 @@ class TaskCreate(BaseModel):
 
     objective: str = Field(min_length=1, max_length=100_000)
     repository_url: str = Field(min_length=1, max_length=2048)
+    # The FORK ForgeMind pushes to / opens PRs against (Phase 10). Optional:
+    # when unset, git.push and github.create_pr fail closed at PR_CREATION.
+    fork_url: str | None = Field(default=None, max_length=2048)
+    # Optional GitHub issue this task originates from (target of
+    # github.get_issue + the PR-comment link).
+    issue_number: int | None = Field(default=None, ge=1)
 
     @field_validator("repository_url")
     @classmethod
@@ -52,6 +58,28 @@ class TaskCreate(BaseModel):
         ):
             raise ValueError("repository_url must include a host and a repository path")
         return value
+
+    @field_validator("fork_url")
+    @classmethod
+    def validate_fork_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("fork_url must not be empty")
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https", "ssh", "git", "file"}:
+            raise ValueError(
+                "fork_url must be a well-formed git URL "
+                "(e.g. https://github.com/you/fork.git or git@github.com:you/fork.git)"
+            )
+        return value
+
+
+class ApprovalRequest(BaseModel):
+    """Request body for POST /tasks/{id}/approve and /reject."""
+
+    reason: str | None = Field(default=None, max_length=10_000)
 
 
 class TaskRead(BaseModel):

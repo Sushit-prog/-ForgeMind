@@ -11,6 +11,7 @@ security_results, pull_requests, ...) arrive with the phases that use them
 """
 
 from app.models.base import Base, JsonType
+from app.models.approval import Approval
 from app.models.audit import AuditLog
 from app.models.capability import Capability
 from app.models.execution_event import ExecutionEvent
@@ -18,6 +19,7 @@ from app.models.failure import FailureClassification
 from app.models.implementation_summary import ImplementationSummary
 from app.models.plan import Plan, PlanStep
 from app.models.policy import Policy
+from app.models.pull_request import PullRequest
 from app.models.repository import Repository, Worktree
 from app.models.research_artifact import ResearchArtifact
 from app.models.review_result import ReviewResult
@@ -27,6 +29,7 @@ from app.models.test_run import Failure, TestRun
 from app.models.tool_call import ToolCall, ToolCallStatus
 
 __all__ = [
+    "Approval",
     "AuditLog",
     "Base",
     "Capability",
@@ -38,6 +41,7 @@ __all__ = [
     "Plan",
     "PlanStep",
     "Policy",
+    "PullRequest",
     "Repository",
     "ResearchArtifact",
     "ReviewResult",

@@ -11,7 +11,9 @@ from app.capabilities.models import Capability
 
 # Section H: capability set assigned per agent, never all-at-once.
 AGENT_CAPABILITIES: dict[str, frozenset[Capability]] = {
-    "research": frozenset({Capability.REPO_READ, Capability.GIT_READ, Capability.GITHUB_READ}),
+    "research": frozenset(
+        {Capability.REPO_READ, Capability.GIT_READ, Capability.GITHUB_READ}
+    ),
     "developer": frozenset(
         {
             Capability.REPO_READ,
@@ -26,7 +28,12 @@ AGENT_CAPABILITIES: dict[str, frozenset[Capability]] = {
     "debugger": frozenset({Capability.REPO_READ, Capability.GIT_READ}),
     "reviewer": frozenset({Capability.REPO_READ, Capability.GIT_READ}),
     "security": frozenset({Capability.REPO_READ, Capability.GIT_READ}),
-    "github": frozenset({Capability.GITHUB_READ, Capability.GITHUB_WRITE}),
+    # The GitHub Agent (Phase 10) must push the worktree branch and create
+    # the PR, so it holds git.write (the push tool) + both github caps.
+    # Notably there is NO github.merge capability in this domain at all.
+    "github": frozenset(
+        {Capability.GITHUB_READ, Capability.GITHUB_WRITE, Capability.GIT_WRITE}
+    ),
 }
 
 

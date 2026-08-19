@@ -32,6 +32,8 @@ EXPECTED_TABLES = {
     "failure_classifications",
     "review_results",
     "security_results",
+    "pull_requests",
+    "approvals",
 }
 
 

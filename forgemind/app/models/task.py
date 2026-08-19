@@ -52,6 +52,11 @@ class Task(Base):
         String(32), nullable=False, default=TaskStatus.CREATED.value
     )
 
+    # Optional GitHub issue this task originated from (Phase 10) — the
+    # target of github.get_issue reads and the PR-comment link. Nullable:
+    # a task may be issue-less (objective-only).
+    issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Budget — from the domain model: max_cost/max_tokens/max_runtime/max_replans.
     # max_replans defaults to a bounded value (Section D: replan-budget
     # exhaustion -> ESCALATED, never an unbounded failure loop). The column
@@ -60,10 +65,15 @@ class Task(Base):
     max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_runtime: Mapped[int | None] = mapped_column(Integer, nullable=True)  # seconds
     max_replans: Mapped[int | None] = mapped_column(Integer, nullable=True, default=3)
-    replan_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    replan_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -89,8 +99,15 @@ class TaskStep(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
     input: Mapped[dict | None] = mapped_column(JsonType, nullable=True)
     output: Mapped[dict | None] = mapped_column(JsonType, nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

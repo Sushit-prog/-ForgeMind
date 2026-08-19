@@ -11,7 +11,8 @@ import uuid
 from sqlalchemy import select
 
 from app.models import ExecutionEvent, Plan, PlanStep
-from tests_e2e.conftest import spawn_worker, wait_for
+from tests_e2e.conftest import approve_task, spawn_worker
+
 
 def valid_payload(source_repo) -> dict:
     """A real clonable repo: RESEARCHING now runs the real agent (Phase 6),
@@ -19,6 +20,7 @@ def valid_payload(source_repo) -> dict:
     return {
         "objective": "Fix the login bug",
         "repository_url": "file:///" + str(source_repo).replace("\\", "/"),
+        "fork_url": "https://github.com/fork-owner/forgemind-e2e-fork",
     }
 
 
@@ -28,10 +30,7 @@ def test_worker_persists_real_plan(client, db_session, source_repo) -> None:
         created = client.post("/tasks", json=valid_payload(source_repo)).json()
         task_id = uuid.UUID(created["id"])
 
-        def completed() -> bool:
-            return client.get(f"/tasks/{task_id}").json()["status"] == "COMPLETED"
-
-        assert wait_for(completed, timeout=60)
+        approve_task(client, task_id)
 
         # A REAL plan was persisted (not the stub's hardcoded happy path).
         plans = db_session.scalars(select(Plan).where(Plan.task_id == task_id)).all()
@@ -64,10 +63,7 @@ def test_worker_retries_flaky_planner_output(client, db_session, source_repo) ->
         created = client.post("/tasks", json=valid_payload(source_repo)).json()
         task_id = uuid.UUID(created["id"])
 
-        def completed() -> bool:
-            return client.get(f"/tasks/{task_id}").json()["status"] == "COMPLETED"
-
-        assert wait_for(completed, timeout=60)
+        approve_task(client, task_id)
         plans = db_session.scalars(select(Plan).where(Plan.task_id == task_id)).all()
         # Retry succeeded: exactly one ACTIVE plan (no INVALID leftover row
         # from a persisted failure — the first attempt never persisted).

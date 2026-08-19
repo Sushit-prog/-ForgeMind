@@ -31,12 +31,21 @@ GIT_ENV: dict[str, str] = {
 }
 
 
-def run_git(cwd: Path | str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run_git(
+    cwd: Path | str,
+    *args: str,
+    check: bool = True,
+    redact_args: bool = False,
+) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` in ``cwd`` with the fixed identity env.
 
     Raises ``GitOperationError`` (with the command's stderr) on non-zero
     exit when ``check`` is True. Text mode with explicit encoding so
     output is parsed deterministically on every platform.
+
+    ``redact_args`` suppresses the argument list from error messages —
+    Phase 10's ``git.push`` passes a credential-bearing URL as an argument
+    and that must never reach a log line.
     """
     env = {**os.environ, **GIT_ENV}
     proc = subprocess.run(
@@ -51,7 +60,8 @@ def run_git(cwd: Path | str, *args: str, check: bool = True) -> subprocess.Compl
     )
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
-        raise GitOperationError(f"git {' '.join(args)} failed: {stderr}")
+        shown = "<redacted args>" if redact_args else " ".join(args)
+        raise GitOperationError(f"git {shown} failed: {stderr}")
     return proc
 
 

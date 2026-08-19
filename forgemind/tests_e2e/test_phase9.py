@@ -38,7 +38,7 @@ from sqlalchemy import select
 
 from app.git.runner import run_git
 from app.models import ExecutionEvent, ReviewResult, SecurityResult, Task
-from tests_e2e.conftest import spawn_worker, wait_for
+from tests_e2e.conftest import approve_task, spawn_worker, wait_for
 
 
 def _file_url(repo: Path) -> str:
@@ -73,7 +73,11 @@ def _make_repo(tmp_path) -> Path:
 def _submit(client, repo: Path, objective: str) -> uuid.UUID:
     created = client.post(
         "/tasks",
-        json={"objective": objective, "repository_url": _file_url(repo)},
+        json={
+            "objective": objective,
+            "repository_url": _file_url(repo),
+            "fork_url": "https://github.com/fork-owner/forgemind-e2e-fork",
+        },
     ).json()
     return uuid.UUID(created["id"])
 
@@ -87,9 +91,7 @@ def _event_trail(db, task_id: uuid.UUID) -> list[tuple[str, str]]:
     return [(e.from_status, e.to_status) for e in events]
 
 
-def test_reviewer_reject_then_approve_full_loop(
-    client, db_session, tmp_path
-) -> None:
+def test_reviewer_reject_then_approve_full_loop(client, db_session, tmp_path) -> None:
     """The reviewer genuinely rejects (REQUEST_CHANGES on VALUE = 2), the
     developer replans to VALUE = 3, the second review approves, and the
     task completes through SECURITY_REVIEW and VERIFICATION — with both
@@ -100,10 +102,7 @@ def test_reviewer_reject_then_approve_full_loop(
     try:
         task_id = _submit(client, repo, "make the value acceptable to review")
 
-        def completed() -> bool:
-            return client.get(f"/tasks/{task_id}").json()["status"] == "COMPLETED"
-
-        assert wait_for(completed, timeout=120), "task never reached COMPLETED"
+        approve_task(client, task_id, timeout=120)
 
         trail = _event_trail(db_session, task_id)
         assert ("REVIEWING", "IMPLEMENTING") in trail, trail  # rejected -> replan
@@ -145,10 +144,7 @@ def test_security_fail_then_pass_full_loop(client, db_session, tmp_path) -> None
     try:
         task_id = _submit(client, repo, "make the value acceptable to security")
 
-        def completed() -> bool:
-            return client.get(f"/tasks/{task_id}").json()["status"] == "COMPLETED"
-
-        assert wait_for(completed, timeout=120), "task never reached COMPLETED"
+        approve_task(client, task_id, timeout=120)
 
         trail = _event_trail(db_session, task_id)
         assert ("SECURITY_REVIEW", "IMPLEMENTING") in trail, trail  # failed -> replan

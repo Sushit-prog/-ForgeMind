@@ -31,7 +31,7 @@ LEGAL_PAIRS = [
     (TaskStatus.VERIFICATION, TaskStatus.PR_CREATION),
     (TaskStatus.PR_CREATION, TaskStatus.AWAITING_APPROVAL),
     (TaskStatus.AWAITING_APPROVAL, TaskStatus.COMPLETED),
-    (TaskStatus.AWAITING_APPROVAL, TaskStatus.REPLANNING),
+    (TaskStatus.AWAITING_APPROVAL, TaskStatus.FAILED),  # human rejects (Phase 10)
     (TaskStatus.FAILED, TaskStatus.RECOVERING),
     (TaskStatus.RECOVERING, TaskStatus.REPLANNING),
     (TaskStatus.REPLANNING, TaskStatus.RESEARCHING),
@@ -74,12 +74,12 @@ def test_no_self_transitions() -> None:
 # --- illegal transitions -----------------------------------------------------
 
 ILLEGAL_PAIRS = [
-    (TaskStatus.PLANNING, TaskStatus.COMPLETED),   # skipped every stage
-    (TaskStatus.TESTING, TaskStatus.COMPLETED),    # no review gate
+    (TaskStatus.PLANNING, TaskStatus.COMPLETED),  # skipped every stage
+    (TaskStatus.TESTING, TaskStatus.COMPLETED),  # no review gate
     (TaskStatus.CREATED, TaskStatus.PR_CREATION),  # teleport to PR
     (TaskStatus.CREATED, TaskStatus.AWAITING_APPROVAL),
-    (TaskStatus.REVIEWING, TaskStatus.TESTING),    # going backwards
-    (TaskStatus.COMPLETED, TaskStatus.PLANNING),   # resurrect a finished task
+    (TaskStatus.REVIEWING, TaskStatus.TESTING),  # going backwards
+    (TaskStatus.COMPLETED, TaskStatus.PLANNING),  # resurrect a finished task
     (TaskStatus.ESCALATED, TaskStatus.RECOVERING),  # escalated is frozen
     (TaskStatus.REPLANNING, TaskStatus.COMPLETED),
     # NOTE: DEBUGGING -> REVIEWING is legal since Phase 8 (flaky path).
@@ -115,9 +115,7 @@ def test_happy_path_walks_full_pipeline_to_completed() -> None:
     status = TaskStatus.CREATED
     seen = [status]
     while status is not None:
-        status = next_status(
-            status, replan_count=0, max_replans=None, last_reason=None
-        )
+        status = next_status(status, replan_count=0, max_replans=None, last_reason=None)
         if status is not None:
             seen.append(status)
     assert seen == AUTO_PIPELINE
@@ -167,7 +165,9 @@ def test_replanning_with_budget_left_goes_back_to_research() -> None:
 
 def test_debugging_returns_to_implementing() -> None:
     assert (
-        next_status(TaskStatus.DEBUGGING, replan_count=0, max_replans=None, last_reason=None)
+        next_status(
+            TaskStatus.DEBUGGING, replan_count=0, max_replans=None, last_reason=None
+        )
         is TaskStatus.IMPLEMENTING
     )
 

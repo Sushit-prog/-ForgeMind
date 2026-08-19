@@ -62,7 +62,9 @@ def test_planning_transition_persists_plan_and_moves_to_researching(
 
 def test_failed_plan_goes_to_failed_not_escalated(db_session, repo_task) -> None:
     task = make_planning_task(db_session, repo_task)
-    planner = PlanningAgent(StubLLMProvider(responses=[MALFORMED_RESPONSE, MALFORMED_RESPONSE]))
+    planner = PlanningAgent(
+        StubLLMProvider(responses=[MALFORMED_RESPONSE, MALFORMED_RESPONSE])
+    )
 
     new_status = run(advance_task_with_agents(db_session, task.id, planner=planner))
 
@@ -89,15 +91,16 @@ def test_no_planner_fails_task_cleanly(db_session, repo_task) -> None:
     assert events_for(db_session, task.id)[-1].reason == "no_llm_provider"
 
 
-def test_non_agent_states_use_stub_and_never_call_planner(db_session, repo_task) -> None:
-    """States outside the agent set (Phase 9: PLANNING/RESEARCHING/IMPLEMENTING/
-    TESTING/DEBUGGING/REVIEWING/SECURITY_REVIEW/VERIFICATION are ALL real now)
-    are still stub-driven: PR_CREATION -> AWAITING_APPROVAL never invokes the
-    planner."""
+def test_non_agent_states_use_stub_and_never_call_planner(
+    db_session, repo_task
+) -> None:
+    """PR_CREATION runs the deterministic GitHub agent (Phase 10), then the
+    task parks at AWAITING_APPROVAL — TERMINAL-UNTIL-HUMAN: the worker never
+    auto-advances it, and neither PLANNING nor any other LLM agent is ever
+    invoked."""
     repo, task = repo_task
     # Advance past every agent state to PR_CREATION (bypassing their agent
-    # semantics — this test only proves the stub fallthrough for the states
-    # that are STILL stubs).
+    # semantics — this test only proves the remaining states' routing).
     for target in (
         TaskStatus.PLANNING,
         TaskStatus.RESEARCHING,
@@ -113,11 +116,31 @@ def test_non_agent_states_use_stub_and_never_call_planner(db_session, repo_task)
 
     provider = StubLLMProvider()
     planner = PlanningAgent(provider)
-    new_status = run(advance_task_with_agents(db_session, task.id, planner=planner))
 
-    assert new_status is TaskStatus.AWAITING_APPROVAL  # stub PR_CREATION -> AWAITING_APPROVAL
+    class _FakeGitHub:
+        """The deterministic GitHub agent, stubbed out for this routing test."""
+
+        async def run(self, task, ctx) -> None:
+            return None
+
+    new_status = run(
+        advance_task_with_agents(
+            db_session, task.id, planner=planner, github=_FakeGitHub()
+        )
+    )
+
+    assert (
+        new_status is TaskStatus.AWAITING_APPROVAL
+    )  # PR_CREATION -> AWAITING_APPROVAL
     assert provider.structured_calls == []  # planner never invoked
     assert not db_session.scalars(select(Plan)).all()  # no plan persisted
+
+    # AWAITING_APPROVAL is terminal-until-human: re-running the worker unit
+    # of work returns None (the job ends) and the task stays parked.
+    parked = run(advance_task_with_agents(db_session, task.id, planner=planner))
+    assert parked is None
+    db_session.expire_all()
+    assert db_session.get(Task, task.id).status == "AWAITING_APPROVAL"
 
 
 def test_testing_without_tester_fails_cleanly(db_session, repo_task) -> None:

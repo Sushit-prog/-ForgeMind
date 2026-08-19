@@ -72,51 +72,81 @@ class Settings(BaseSettings):
         description="OpenAI-compatible base URL (self-hosted gateways supported).",
     )
     llm_model_planner: str | None = Field(
-        default=None, description="Model for the planning agent (env: LLM_MODEL_PLANNER)."
+        default=None,
+        description="Model for the planning agent (env: LLM_MODEL_PLANNER).",
     )
     llm_model_debugger: str | None = Field(
-        default=None, description="Model for the debugger agent (env: LLM_MODEL_DEBUGGER)."
+        default=None,
+        description="Model for the debugger agent (env: LLM_MODEL_DEBUGGER).",
     )
-    llm_timeout_seconds: float = Field(default=60.0, description="Per-LLM-call timeout.")
+    llm_timeout_seconds: float = Field(
+        default=60.0, description="Per-LLM-call timeout."
+    )
     llm_max_retries: int = Field(
         default=2, description="Bounded transient (timeout/5xx) retries per call."
     )
     # Research agent (Phase 6): hard cap on tool calls per task before a
     # forced synthesis — the budget-limiting pattern from Section 42.
     max_research_tool_calls: int = Field(
-        default=10, description="Max tool calls per research run (env: MAX_RESEARCH_TOOL_CALLS)."
+        default=10,
+        description="Max tool calls per research run (env: MAX_RESEARCH_TOOL_CALLS).",
     )
     # Developer agent (Phase 7): hard cap on tool calls per task. Exhausting
     # the budget with no commit is a hard failure (not forced synthesis) — an
     # implementation without a commit is nothing.
     max_developer_tool_calls: int = Field(
-        default=20, description="Max tool calls per developer run (env: MAX_DEVELOPER_TOOL_CALLS)."
+        default=20,
+        description="Max tool calls per developer run (env: MAX_DEVELOPER_TOOL_CALLS).",
     )
     # Debugger agent (Phase 8): hard cap on investigation tool calls per task
     # before a forced classification.
     max_debugger_tool_calls: int = Field(
-        default=10, description="Max tool calls per debugger run (env: MAX_DEBUGGER_TOOL_CALLS)."
+        default=10,
+        description="Max tool calls per debugger run (env: MAX_DEBUGGER_TOOL_CALLS).",
     )
     # shell.run_test (Phase 8): hard timeout on the test subprocess. A hung
     # suite times out into status "error" (never "failed") so the Debugger
     # can tell a hang from a clean failing exit code.
     test_timeout_seconds: float = Field(
-        default=300.0, description="Timeout for the test subprocess (env: TEST_TIMEOUT_SECONDS)."
+        default=300.0,
+        description="Timeout for the test subprocess (env: TEST_TIMEOUT_SECONDS).",
     )
     # Reviewer + Security agents (Phase 9): hard caps on their read-only
     # investigation tool calls before a forced verdict. Models per role env
     # vars (LLM_MODEL_REVIEWER, LLM_MODEL_SECURITY).
     max_reviewer_tool_calls: int = Field(
-        default=10, description="Max tool calls per reviewer run (env: MAX_REVIEWER_TOOL_CALLS)."
+        default=10,
+        description="Max tool calls per reviewer run (env: MAX_REVIEWER_TOOL_CALLS).",
     )
     max_security_tool_calls: int = Field(
-        default=10, description="Max tool calls per security run (env: MAX_SECURITY_TOOL_CALLS)."
+        default=10,
+        description="Max tool calls per security run (env: MAX_SECURITY_TOOL_CALLS).",
     )
     llm_model_reviewer: str | None = Field(
-        default=None, description="Model for the reviewer agent (env: LLM_MODEL_REVIEWER)."
+        default=None,
+        description="Model for the reviewer agent (env: LLM_MODEL_REVIEWER).",
     )
     llm_model_security: str | None = Field(
-        default=None, description="Model for the security agent (env: LLM_MODEL_SECURITY)."
+        default=None,
+        description="Model for the security agent (env: LLM_MODEL_SECURITY).",
+    )
+    # GitHub integration (Phase 10). GITHUB_TOKEN is the ONLY credential and
+    # a SECRET — loaded from env only, never hardcoded, never logged. The
+    # base URL is configurable for GitHub Enterprise / self-hosted gateways.
+    github_token: str | None = Field(
+        default=None,
+        description="GitHub personal access token (secret — never logged).",
+    )
+    github_base_url: str = Field(
+        default="https://api.github.com",
+        description="GitHub REST API base URL (self-hosted GitHub supported).",
+    )
+    github_api_timeout_seconds: float = Field(
+        default=20.0, description="Per-GitHub-request timeout."
+    )
+    github_max_retries: int = Field(
+        default=3,
+        description="Bounded transient (429/5xx/timeout) retries per GitHub call.",
     )
 
 

@@ -14,12 +14,14 @@ from sqlalchemy import select
 
 from app.models import ExecutionEvent, Task
 from app.runtime.task_lifecycle import AUTO_PIPELINE
-from tests_e2e.conftest import spawn_worker, wait_for
+from tests_e2e.conftest import approve_task, spawn_worker
 
 EXPECTED_STATUSES = [s.value for s in AUTO_PIPELINE][1:]
 
 
-def test_two_workers_same_task_no_double_processing(client, db_session, source_repo) -> None:
+def test_two_workers_same_task_no_double_processing(
+    client, db_session, source_repo
+) -> None:
     # Two workers, a widened transition window so races are actually possible.
     workers = [
         spawn_worker({"FORGEMIND_STEP_DELAY_MS": "150"}),
@@ -34,15 +36,13 @@ def test_two_workers_same_task_no_double_processing(client, db_session, source_r
                     "objective": f"Task {i}",
                     # A real clonable repo: RESEARCHING (Phase 6) needs one.
                     "repository_url": "file:///" + str(source_repo).replace("\\", "/"),
+                    "fork_url": "https://github.com/fork-owner/forgemind-e2e-fork",
                 },
             ).json()
             tasks.append(uuid.UUID(created["id"]))
 
         for task_id in tasks:
-            def completed(tid: uuid.UUID = task_id) -> bool:
-                return client.get(f"/tasks/{tid}").json()["status"] == "COMPLETED"
-
-            assert wait_for(completed, timeout=60), f"task {task_id} never completed"
+            approve_task(client, task_id, timeout=60)
 
             events = db_session.scalars(
                 select(ExecutionEvent)

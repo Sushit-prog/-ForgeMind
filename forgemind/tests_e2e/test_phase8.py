@@ -35,7 +35,7 @@ from sqlalchemy import select
 
 from app.git.runner import run_git
 from app.models import ExecutionEvent, FailureClassification, Task, TestRun
-from tests_e2e.conftest import spawn_worker, wait_for
+from tests_e2e.conftest import approve_task, spawn_worker, wait_for
 
 
 def _file_url(repo: Path) -> str:
@@ -69,7 +69,11 @@ def _make_repo(tmp_path, *, test_body: str, initial_value: str = "VALUE = 1\n") 
 def _submit(client, repo: Path, objective: str) -> uuid.UUID:
     created = client.post(
         "/tasks",
-        json={"objective": objective, "repository_url": _file_url(repo)},
+        json={
+            "objective": objective,
+            "repository_url": _file_url(repo),
+            "fork_url": "https://github.com/fork-owner/forgemind-e2e-fork",
+        },
     ).json()
     return uuid.UUID(created["id"])
 
@@ -104,10 +108,7 @@ def test_fail_once_debug_then_pass_full_loop(client, db_session, tmp_path) -> No
     try:
         task_id = _submit(client, repo, "make the failing test pass")
 
-        def completed() -> bool:
-            return client.get(f"/tasks/{task_id}").json()["status"] == "COMPLETED"
-
-        assert wait_for(completed, timeout=120), "task never reached COMPLETED"
+        approve_task(client, task_id, timeout=120)
 
         trail = _event_trail(db_session, task_id)
         assert ("TESTING", "DEBUGGING") in trail, trail
@@ -177,10 +178,7 @@ def test_flaky_test_detected_by_rerun_routes_to_reviewing(
     try:
         task_id = _submit(client, repo, "fix the flaky test")
 
-        def completed() -> bool:
-            return client.get(f"/tasks/{task_id}").json()["status"] == "COMPLETED"
-
-        assert wait_for(completed, timeout=120), "task never reached COMPLETED"
+        approve_task(client, task_id, timeout=120)
 
         trail = _event_trail(db_session, task_id)
         assert ("TESTING", "DEBUGGING") in trail, trail

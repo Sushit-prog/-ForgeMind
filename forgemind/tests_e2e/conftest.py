@@ -22,7 +22,9 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-os.environ["DATABASE_URL"] = "postgresql+psycopg://forgemind:forgemind@localhost:5433/forgemind"
+os.environ["DATABASE_URL"] = (
+    "postgresql+psycopg://forgemind:forgemind@localhost:5433/forgemind"
+)
 os.environ["REDIS_URL"] = "redis://localhost:6379/0"
 os.environ["ENVIRONMENT"] = "test"
 os.environ["LOG_LEVEL"] = "WARNING"
@@ -118,14 +120,14 @@ def source_repo(tmp_path):
     (repo / "src").mkdir()
     (repo / "src" / "app.py").write_text("VALUE = 1\n")
     (repo / "pyproject.toml").write_text(
-        "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n"
+        '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n'
     )
     (repo / "tests").mkdir()
     (repo / "tests" / "test_app.py").write_text(
         "from pathlib import Path\n\n\n"
         "def test_value_is_two() -> None:\n"
-        "    content = Path(\"src/app.py\").read_text()\n"
-        "    assert \"VALUE = 2\" in content\n"
+        '    content = Path("src/app.py").read_text()\n'
+        '    assert "VALUE = 2" in content\n'
     )
     run_git(repo, "add", "-A")
     run_git(repo, "commit", "-m", "initial commit")
@@ -146,17 +148,6 @@ def repo_task(db_session, source_repo):
     db_session.refresh(repo)
     db_session.refresh(task)
     return repo, task
-
-
-def _truncate_all() -> None:
-    """Wipe the task-domain tables (CASCADE handles all FKs)."""
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                "TRUNCATE repositories, tasks, execution_events, audit_logs, "
-                "tool_calls, worktrees RESTART IDENTITY CASCADE"
-            )
-        )
 
 
 def _flush_redis() -> None:
@@ -197,11 +188,15 @@ def wait_for(predicate, timeout: float = 30.0, interval: float = 0.1) -> bool:
 def spawn_worker(env_extra: dict[str, str] | None = None) -> subprocess.Popen:
     """Start a worker subprocess against the e2e Postgres/Redis.
 
-    Defaults to the stub LLM provider (no API key needed); pass
-    ``FORGEMIND_MOCK_LLM_FLAKY=1`` to exercise the planner retry path.
+    Defaults to the stub LLM provider (no API key needed) AND the stub
+    GitHub client (no network, no token) — Phase 10's PR_CREATION then runs
+    against the in-memory stub. Pass ``FORGEMIND_MOCK_LLM_FLAKY=1`` to
+    exercise the planner retry path, or a real ``GITHUB_TOKEN`` for the
+    real-GitHub e2e test.
     """
     env = os.environ.copy()
     env.setdefault("FORGEMIND_MOCK_LLM", "1")
+    env.setdefault("FORGEMIND_MOCK_GITHUB", "1")
     if env_extra:
         env.update(env_extra)
     return subprocess.Popen(
@@ -211,3 +206,33 @@ def spawn_worker(env_extra: dict[str, str] | None = None) -> subprocess.Popen:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def approve_task(client, task_id, timeout: float = 120.0) -> None:
+    """Drive the task through the human checkpoint: wait for
+    AWAITING_APPROVAL, then approve -> COMPLETED. (Exactly what a human does
+    at the checkpoint; in the stub-GitHub e2e the draft PR was created.)"""
+
+    def awaiting() -> bool:
+        return client.get(f"/tasks/{task_id}").json()["status"] == "AWAITING_APPROVAL"
+
+    assert wait_for(awaiting, timeout=timeout), "task never reached AWAITING_APPROVAL"
+    resp = client.post(f"/tasks/{task_id}/approve")
+    assert resp.status_code == 200, resp.text
+
+    def completed() -> bool:
+        return client.get(f"/tasks/{task_id}").json()["status"] == "COMPLETED"
+
+    assert wait_for(completed, timeout=timeout), "task never reached COMPLETED"
+
+
+def _truncate_all() -> None:
+    """Wipe the task-domain tables (CASCADE handles all FKs)."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "TRUNCATE repositories, tasks, execution_events, audit_logs, "
+                "tool_calls, worktrees, pull_requests, approvals "
+                "RESTART IDENTITY CASCADE"
+            )
+        )

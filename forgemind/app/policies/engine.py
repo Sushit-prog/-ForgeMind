@@ -27,12 +27,16 @@ def default_policy_rules() -> list[PolicyRule]:
     - ``RiskTierRule`` — CRITICAL risk is denied unless explicitly allowlisted
       (no CRITICAL tools exist yet, so this is a no-op guard for later).
     - ``ExplicitDenyRule`` — denies ``example.denied`` by name, proving the
-      DENY path. Real deny rules (shell allowlist, no-push-to-main) arrive
-      with the tools that need them in later phases.
+      DENY path. ``github.merge`` is denied by name as a SECOND layer under
+      the missing capability: no merge capability or tool exists anywhere,
+      and even if one were ever registered it would be denied here — this
+      system never merges anything, ever.
     """
     return [
         RiskTierRule(),
-        ExplicitDenyRule(denied_tools={"example.denied"}),
+        ExplicitDenyRule(
+            denied_tools={"example.denied", "github.merge"},
+        ),
     ]
 
 
@@ -45,7 +49,9 @@ class PolicyEngine:
     """
 
     def __init__(self, rules: list[PolicyRule] | None = None) -> None:
-        self.rules: list[PolicyRule] = rules if rules is not None else default_policy_rules()
+        self.rules: list[PolicyRule] = (
+            rules if rules is not None else default_policy_rules()
+        )
 
     def evaluate(
         self,

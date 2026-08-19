@@ -19,7 +19,13 @@ class Repository(Base):
     __tablename__ = "repositories"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # The UPSTREAM reference: used for cloning (Phase 4) and github.get_issue
+    # reads (issues live upstream). Never a push/PR target.
     url: Mapped[str] = mapped_column(String(2048), nullable=False, unique=True)
+    # The FORK ForgeMind actually pushes to and opens PRs against (Phase 10).
+    # Nullable and structurally required: if unset, git.push and
+    # github.create_pr FAIL CLOSED — there is no fallback to ``url``, ever.
+    fork_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     default_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     local_path: Mapped[str | None] = mapped_column(Text, nullable=True)  # worktree root
     # Cached clone location, set once by RepositoryDiscovery (Phase 4) — never
@@ -30,7 +36,10 @@ class Repository(Base):
     lint_command: Mapped[str | None] = mapped_column(Text, nullable=True)
     build_command: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -65,5 +74,8 @@ class Worktree(Base):
     base_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

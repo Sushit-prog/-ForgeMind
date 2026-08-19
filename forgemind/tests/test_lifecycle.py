@@ -21,7 +21,9 @@ from app.runtime.task_lifecycle import (
 
 
 def make_task(db, status: TaskStatus = TaskStatus.CREATED) -> Task:
-    repo = db.scalar(select(Repository).where(Repository.url == "https://github.com/o/r.git"))
+    repo = db.scalar(
+        select(Repository).where(Repository.url == "https://github.com/o/r.git")
+    )
     if repo is None:
         repo = Repository(url="https://github.com/o/r.git")
         db.add(repo)
@@ -77,7 +79,7 @@ def test_illegal_transition_raises_and_persists_nothing(db_session) -> None:
 
 
 def test_replanning_increments_replan_count(db_session) -> None:
-    task = make_task(db_session, status=TaskStatus.AWAITING_APPROVAL)
+    task = make_task(db_session, status=TaskStatus.RECOVERING)
     assert task.replan_count == 0
     transition_task(db_session, task, TaskStatus.REPLANNING)
     db_session.commit()

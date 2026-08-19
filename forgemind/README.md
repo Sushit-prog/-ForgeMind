@@ -68,6 +68,22 @@ Current milestone scope:
   never merged/ambiguous). VERIFICATION is a plain-code staleness check (no LLM): the
   reviewed commit must still be worktree HEAD and the last test run still passed, else back
   to TESTING (stale review).
+- **Phase 10 — GitHub Agent + PR runtime**: the mission's finishing move — the task's
+  verified branch lands as a real DRAFT pull request on a FORK, and the human gets a
+  blocking checkpoint. `git.push` (the ONLY push in the system) force-pushes the task branch
+  to `repositories.fork_url` — unset or upstream-identical fork fails closed, and the token
+  is embedded per-invocation (`x-access-token`) with the argument list redacted, never
+  persisted to git config. `github.create_pr` is the first HIGH-risk tool and the phase's
+  approval-gated surface: its target is resolved server-side (no `owner`/`repo`/`head`/`base`
+  input exists at all), it opens a DRAFT by construction, and there is no `github.merge`
+  tool, capability, or client method anywhere (the policy engine also denies it by name) —
+  merging stays a manual action. The GitHub Agent is deterministic (no LLM): push → draft PR
+  whose body is a plain-code readout of the PERSISTED artifacts (plan, research,
+  implementation, test, review, security) → best-effort comment on the source issue (a
+  comment failure never fails the task) → persist the `pull_requests` row — and only then
+  does PR_CREATION → AWAITING_APPROVAL fire. The human decides via
+  `POST /tasks/{id}/approve|reject`: approve → COMPLETED (merging remains yours, on GitHub),
+  reject → FAILED deliberately (a human stop, never an auto-replan).
 
 ## Quick start
 
@@ -98,13 +114,15 @@ Then:
 ```bash
 curl -X POST localhost:8000/tasks \
   -H 'Content-Type: application/json' \
-  -d '{"objective": "Fix the flaky test in auth", "repository_url": "https://github.com/org/repo.git"}'
+  -d '{"objective": "Fix the flaky test in auth", "repository_url": "https://github.com/org/repo.git", "fork_url": "https://github.com/you/org-fork.git"}'
 # -> 201 {"id": "...", "status": "CREATED", ...}  (advance_task job enqueued)
 
 curl localhost:8000/tasks                # list
-curl localhost:8000/tasks/{id}           # fetch one — watch status walk to COMPLETED
+curl localhost:8000/tasks/{id}           # fetch one — watch status walk to AWAITING_APPROVAL
 curl localhost:8000/tasks/{id}/events    # ordered execution-event trail
 curl -X POST localhost:8000/tasks/{id}/cancel   # -> FAILED (user_cancelled); 409 on terminal tasks
+curl -X POST localhost:8000/tasks/{id}/approve  # human checks out the draft PR, then approves -> COMPLETED
+curl -X POST localhost:8000/tasks/{id}/reject   # human rejects -> FAILED (deliberate stop)
 curl localhost:8000/health               # {"status": "ok"}
 ```
 
@@ -113,11 +131,14 @@ curl localhost:8000/health               # {"status": "ok"}
 ```bash
 pytest              # hermetic suite (SQLite, no services) — state machine, lifecycle, API,
                     # policy engine, path traversal (read + write), git runtime, planner,
-                    # research + developer + tester + debugger + reviewer + security agents
+                    # research + developer + tester + debugger + reviewer + security agents,
+                    # plus the Phase 10 github.*/git.push tools, GitHub client + stub,
+                    # PR template, GitHub Agent, and the approve/reject API
 pytest tests_e2e/   # end-to-end (needs Postgres + Redis up) — real worker pipeline, cancel,
                     # crash recovery (kill/restart), two-worker concurrency, full agent loops
                     # (REAL subprocess test runs, review reject-then-approve, security fail-
-                    # then-pass, verification staleness)
+                    # then-pass, verification staleness, PR_CREATION -> AWAITING_APPROVAL
+                    # -> human approval; real-GitHub e2e is env-gated on a GITHUB_TOKEN)
 ```
 
 Note: `tests_e2e/` spawns its OWN worker subprocesses on the same Postgres/Redis, so stop the
@@ -143,14 +164,22 @@ app/
                             result only (structural independence from the developer's summary)
     security/               SecurityAgent: read-only checklist scan (injection, secrets,
                             subprocess/network, traversal, auth/authz) — blind to the verdict
-  api/routes/tasks.py       Task API: create/list/get/cancel/events
+    github_agent/           GitHubAgent (deterministic, no LLM): push task branch to the fork,
+                            open a DRAFT PR from persisted artifacts, comment the source issue,
+                            persist the pull_requests row
+  api/routes/tasks.py       Task API: create/list/get/cancel/events + approve/reject
   capabilities/             Capability value objects + per-agent assignment (Section H)
   database/                 engine/session + Alembic migrations
   execution/tool_pipeline.py  validate -> capability -> policy -> execute -> audit
   git/
     runner.py               git subprocess runner (arg lists only, fixed identity, no prompts)
-    operations.py           status/diff/log/create_branch/commit on a worktree
+    operations.py           status/diff/log/create_branch/push/commit on a worktree
+                            (push is the only push in the system — fork-only, force, redacted)
     worktree_manager.py     per-task worktrees (create/discard/path_for) — the only branch creator
+  github/
+    client.py               thin GitHub REST wrapper (httpx, error taxonomy, retry seam)
+    stub.py                 deterministic in-memory client (FORGEMIND_MOCK_GITHUB=1)
+    slug.py                 GitHub URL -> owner/repo parsing (server-side seam)
   llm/
     provider.py             LLMProvider ABC + parse/validate (strict structured_output)
     openrouter.py           OpenAI-compatible provider (httpx, timeouts -> LLMTimeoutError)
@@ -170,7 +199,7 @@ app/
     command_policy.py       test-command allowlist + argument validation (Phase 8)
     runner.py               subprocess execution: arg list only, timeout, captured output
   tools/                    Tool ABC + registry + example tools + repository.* / git.* /
-                            filesystem.* / shell.* tools
+                            filesystem.* / shell.* / github.* tools
   worker/
     queue.py                arq Redis settings + pool + enqueue helper
     jobs/advance_task.py    one job = one transition (PLANNING/RESEARCHING/IMPLEMENTING/
@@ -291,6 +320,73 @@ Example tools prove the paths: `example.echo` (executes), `example.read_file`
   subprocess/network, path traversal, auth/authz — one deliberately planted finding per
   category in a test diff, each caught by the (mocked-LLM) Security agent.
 
+## GitHub Agent + PR runtime (Phase 10)
+
+The mission's last step — the verified branch becomes a real DRAFT pull request on a FORK,
+and a human signs off.
+
+- **`app/github/` — the thin REST wrapper**: `slug.py` parses GitHub URLs into `owner/repo`
+  (the server-side seam); `client.py` is the httpx wrapper with an error taxonomy
+  (auth / not-found / validation / rate-limit / transport) and bounded transient retry
+  (429 / 403-with-exhausted-limit honour `Retry-After`); `stub.py` is the deterministic
+  in-memory client for tests and key-less dev (`FORGEMIND_MOCK_GITHUB=1`); `__init__.py`
+  chooses mock > token > None — no configured token means PR_CREATION fails cleanly instead
+  of hanging, and there is deliberately NO `merge` method anywhere on the client.
+- **`git.push` — the only push in the system**: force-pushes the worktree branch to
+  `repositories.fork_url`. HTTPS auth embeds the PAT as `x-access-token` for that single
+  invocation — never persisted to a git remote config — and the argument list is redacted
+  from error messages, so the credential can never reach a log line. An unset fork or an
+  upstream-identical fork (`fork_url == url`) FAILS CLOSED: the upstream reference is for
+  READS only, never a push/PR target.
+- **`github.*` tools** (enforced in code, never by convention):
+  `github.get_issue` (read, LOW), `github.comment_issue` (write, MEDIUM),
+  `github.create_pr` (write, HIGH — the phase's approval-gated surface). Every tool resolves
+  its target SERVER-SIDE from the task's repository row; `create_pr`'s input is just
+  `{worktree_id, title, body}` with `extra="forbid"`, so a smuggled `owner`/`repo`/`head`/
+  `base` field is rejected at validation — there is no caller-supplied path to redirect the
+  PR. It opens a DRAFT PR onto the fork's default branch, by construction.
+- **No merge anywhere**: no `github.merge` tool, capability, or client method in the whole
+  codebase, and the policy engine denies `github.merge` by name as a second layer. Nothing
+  ForgeMind writes can ever merge — merging is the human's manual action on GitHub.
+- **GitHubAgent** (`github`, deterministic — the Test Agent pattern, NO LLM): push → draft
+  PR whose body is assembled from the PERSISTED artifacts (objective, plan steps, research
+  hypothesis, implementation summary + files changed, last test run, reviewer verdict,
+  security verdict, then a "draft, pending human approval" note) → best-effort comment on
+  the source issue (a failure is audited, never fails the task) → persist the
+  `pull_requests` row. An absent artifact simply omits its section — nothing is invented on
+  a page a human will trust.
+- **The human checkpoint**: PR_CREATION → AWAITING_APPROVAL fires only after the PR row is
+  persisted. AWAITING_APPROVAL is TERMINAL-UNTIL-HUMAN — the worker never auto-advances it.
+  `POST /tasks/{id}/approve` → COMPLETED (records an `approvals` row; merging stays manual);
+  `POST /tasks/{id}/reject` → FAILED — a deliberate stop, never an auto-replan back in. Both
+  are row-locked (409 unless the task is actually AWAITING_APPROVAL) and mirror the PR row's
+  status into the PR-status vocabulary (`approved`/`rejected`) — the PR row NEVER claims a
+  merge.
+
+**Decisions recorded (this phase's report):**
+
+1. **Worktree status on approval — left `active`, deliberately untouched.** On
+   `approve → COMPLETED` no worktree field is written. The `merged` status vocabulary is
+   reserved for an actual git merge, which this system never performs — since merging is
+   manual on GitHub, the worktree's status reflects what ForgeMind did (pushed a branch,
+   opened a PR), never what the human may do later. We never reuse `merged` for anything
+   short of a real merge; a future merge-capable or discard-on-approval phase will make that
+   change explicitly.
+2. **Adversarial fork-vs-upstream tests pass.** The hermetic suite proves the split is
+   enforced by construction: unset `fork_url` fails `create_pr` closed; `fork_url == url`
+   raises SecurityError; a smuggled `owner`/`repo`/`head`/`base` is rejected at validation;
+   and the suite asserts there is NO `github.merge` tool in the registry at all.
+3. **The approve/reject endpoints are unauthenticated — a known gap.** This is deliberate
+   for the single-operator MVP: there are no user accounts yet, so any caller who can reach
+   the API can approve. It is flagged in the code and here; auth/authz is the first thing a
+   multi-user build must add.
+4. **Draft-PR-as-second-layer felt sufficient for the MVP.** The gate is not the PR review —
+   it is AWAITING_APPROVAL plus the structural fact that the system physically cannot merge.
+   The draft adds a real place for human review on GitHub's own surface before the operator
+   approves. One accepted consequence: the operator may merge the PR after approving, and the
+   task is already COMPLETED — the completed task means "ForgeMind delivered a reviewed,
+   approved draft PR," not "the merge happened."
+
 ## Developer Agent (Phase 7)
 
 - **Bounded tool-use loop, write-capable**: the LLM proposes ONE tool call per turn
@@ -379,10 +475,11 @@ its last persisted status; the worker's startup sweep re-enqueues it from there.
 
 Tables (architecture doc section G, milestone scope): `tasks`, `plans` (incl.
 `raw_llm_output`), `plan_steps`, `task_steps`, `capabilities`, `policies`, `audit_logs`,
-`repositories` (incl. `local_clone_path`), `worktrees`, `execution_events`, `tool_calls`,
-`research_artifacts`, `implementation_summaries`, `test_runs`, `failures`,
-`failure_classifications`, `review_results`, `security_results`. Remaining Section-G
-tables arrive with the phases that use them (agents/eval). Tasks default to a bounded replan budget
+`repositories` (incl. `local_clone_path` and Phase 10's `fork_url`), `worktrees`,
+`execution_events`, `tool_calls`, `research_artifacts`, `implementation_summaries`,
+`test_runs`, `failures`, `failure_classifications`, `review_results`, `security_results`,
+`pull_requests`, `approvals`. Remaining Section-G tables arrive with the phases that use
+them (agents/eval). Tasks default to a bounded replan budget
 (`max_replans=3`) — Section D's "budget exhausted → ESCALATED" is enforced even when the API
 client sets no budget.
 
@@ -394,5 +491,9 @@ client sets no budget.
 - Shell execution is confined to ONE tool (`shell.run_test`) running the repository's
   allowlist-validated test command as an argument list (never `shell=True`) with a hard
   timeout and captured output — there is no agent-input path into the command at all; file
-  writes are confined to the task's worktree (traversal-rejected), never outside the repo;
-  no external network calls yet.
+  writes are confined to the task's worktree (traversal-rejected), never outside the repo.
+- External network (Phase 10) is confined to the GitHub REST API and a push to the
+  operator's FORK — `repositories.url` is for READS only, and a push/PR target must come
+  from `repositories.fork_url` (fail-closed, never the upstream). The only credential,
+  `GITHUB_TOKEN`, is embedded per-invocation and redacted from every log/audit path; nothing
+  ForgeMind writes can merge a PR (no `github.merge` exists at all).

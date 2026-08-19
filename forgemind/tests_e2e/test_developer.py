@@ -23,7 +23,7 @@ from app.models import (
     ResearchArtifact,
     ToolCall,
 )
-from tests_e2e.conftest import spawn_worker, wait_for
+from tests_e2e.conftest import approve_task, spawn_worker
 
 
 def _file_url(repo: Path) -> str:
@@ -40,18 +40,18 @@ def test_worker_developer_loop_produces_commit_and_summary(
         payload = {
             "objective": "Fix the VALUE bug",
             "repository_url": _file_url(source_repo),
+            "fork_url": "https://github.com/fork-owner/forgemind-e2e-fork",
         }
         created = client.post("/tasks", json=payload).json()
         task_id = uuid.UUID(created["id"])
 
-        def completed() -> bool:
-            return client.get(f"/tasks/{task_id}").json()["status"] == "COMPLETED"
-
-        assert wait_for(completed, timeout=90)
+        approve_task(client, task_id, timeout=120)
 
         # The developer persisted a COMPLETE summary with a real commit sha.
         summaries = db_session.scalars(
-            select(ImplementationSummary).where(ImplementationSummary.task_id == task_id)
+            select(ImplementationSummary).where(
+                ImplementationSummary.task_id == task_id
+            )
         ).all()
         assert len(summaries) == 1
         summary = summaries[0]

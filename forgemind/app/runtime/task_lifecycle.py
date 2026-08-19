@@ -194,6 +194,7 @@ async def advance_task_with_agents(
     debugger=None,
     reviewer=None,
     security=None,
+    github=None,
 ) -> TaskStatus | None:
     """Worker unit of work (Phases 5-9): the real states run the real agents.
 
@@ -205,10 +206,12 @@ async def advance_task_with_agents(
       REVIEWING -> ``reviewer`` (diff + test result only — independent of
       the developer's summary); SECURITY_REVIEW -> ``security`` (diff only,
       blind to the Reviewer's verdict); VERIFICATION -> plain code (Phase 9
-      staleness check, no LLM at all). Each persists its artifact and the
-      transition fires only after persistence. On failure the task goes
-      FAILED (never ESCALATED — reserved for replan-budget exhaustion),
-      with the reason on the event.
+      staleness check, no LLM at all); PR_CREATION -> ``github`` (Phase 10:
+      deterministic — push branch to the fork, open the draft PR from the
+      persisted-artifact template, persist the PR row). Each persists its
+      artifact and the transition fires only after persistence. On failure
+      the task goes FAILED (never ESCALATED — reserved for replan-budget
+      exhaustion), with the reason on the event.
     - TESTING branches for real: passed -> REVIEWING; failed/error ->
       DEBUGGING. DEBUGGING branches for real: flaky -> REVIEWING;
       unfixable -> FAILED with the category; fixable -> IMPLEMENTING.
@@ -218,7 +221,10 @@ async def advance_task_with_agents(
       reviewed commit must still be worktree HEAD and the last test run
       must still be passed — otherwise back to TESTING (stale review). All
       replans draw from the ONE shared max_replans budget at the transition
-      (exhausted -> ESCALATED).
+      (exhausted -> ESCALATED). PR_CREATION -> AWAITING_APPROVAL is
+      unconditional once the PR is persisted; AWAITING_APPROVAL is
+      TERMINAL-UNTIL-HUMAN — this function returns None there (the worker
+      job ends; only the API approve/reject endpoints move the task).
     - every other state: identical to the stub ``advance_task_once``.
 
     Any agent may be None (no provider configured) — the task then fails
@@ -248,6 +254,10 @@ async def advance_task_with_agents(
         return await _run_security_review(db, task, security)
     if current is TaskStatus.VERIFICATION:
         return await _run_verification(db, task)
+    if current is TaskStatus.PR_CREATION:
+        return await _run_pr_creation(db, task, github)
+    if current is TaskStatus.AWAITING_APPROVAL:
+        return await _run_awaiting_approval(db, task)
     return advance_task_once(db, task_id)
 
 
@@ -268,7 +278,8 @@ def _latest_fix_instruction(db: Session, task_id: uuid.UUID) -> str | None:
 
     candidates: list[tuple] = []  # (created_at, source, text)
     classification = db.scalar(
-        select(ClassificationRow).where(ClassificationRow.task_id == task_id)
+        select(ClassificationRow)
+        .where(ClassificationRow.task_id == task_id)
         .order_by(ClassificationRow.created_at.desc(), ClassificationRow.id.desc())
         .limit(1)
     )
@@ -277,7 +288,8 @@ def _latest_fix_instruction(db: Session, task_id: uuid.UUID) -> str | None:
             (classification.created_at, "DEBUGGER", classification.fix_instruction)
         )
     review = db.scalar(
-        select(ReviewRow).where(ReviewRow.task_id == task_id)
+        select(ReviewRow)
+        .where(ReviewRow.task_id == task_id)
         .order_by(ReviewRow.created_at.desc(), ReviewRow.id.desc())
         .limit(1)
     )
@@ -289,7 +301,8 @@ def _latest_fix_instruction(db: Session, task_id: uuid.UUID) -> str | None:
         )
         candidates.append((review.created_at, f"REVIEWER {review.decision}", text))
     security = db.scalar(
-        select(SecurityRow).where(SecurityRow.task_id == task_id)
+        select(SecurityRow)
+        .where(SecurityRow.task_id == task_id)
         .order_by(SecurityRow.created_at.desc(), SecurityRow.id.desc())
         .limit(1)
     )
@@ -334,13 +347,18 @@ def _replan_to_implementing(
     if TaskStatus(locked.status) is not expected:
         logger.info(
             "Task %s already at %s (expected %s) — skipping %s replan",
-            task_id, locked.status, expected.value, reason,
+            task_id,
+            locked.status,
+            expected.value,
+            reason,
         )
         return TaskStatus(locked.status)
     if locked.max_replans is not None and locked.replan_count >= locked.max_replans:
         logger.warning(
             "Task %s replan budget exhausted (%d >= %d) — ESCALATED",
-            task_id, locked.replan_count, locked.max_replans,
+            task_id,
+            locked.replan_count,
+            locked.max_replans,
         )
         transition_task(
             db, locked, TaskStatus.ESCALATED, reason="replan_budget_exhausted"
@@ -387,7 +405,10 @@ def _cas_transition(
     if TaskStatus(locked.status) is not expected:
         logger.info(
             "Task %s already at %s (expected %s) — skipping %s transition",
-            task_id, locked.status, expected.value, target.value,
+            task_id,
+            locked.status,
+            expected.value,
+            target.value,
         )
         return TaskStatus(locked.status)
     transition_task(db, locked, target, reason=reason)
@@ -413,7 +434,11 @@ async def _run_planning(db: Session, task: Task, planner) -> TaskStatus:
     except PlanValidationError as exc:
         logger.error("Task %s plan invalid after retry: %s", task.id, exc)
         return _cas_transition(
-            db, task.id, TaskStatus.PLANNING, TaskStatus.FAILED, "plan_validation_failed"
+            db,
+            task.id,
+            TaskStatus.PLANNING,
+            TaskStatus.FAILED,
+            "plan_validation_failed",
         )
     except (LLMTimeoutError, LLMMalformedOutputError) as exc:
         logger.error("Task %s planner LLM error: %s", task.id, exc)
@@ -446,19 +471,23 @@ async def _run_researching(db: Session, task: Task, researcher) -> TaskStatus:
     from app.tools.base import ExecutionContext
 
     plan = db.scalar(
-        select(PlanRow).where(
-            PlanRow.task_id == task.id, PlanRow.status == "ACTIVE"
-        ).order_by(PlanRow.created_at.desc()).limit(1)
+        select(PlanRow)
+        .where(PlanRow.task_id == task.id, PlanRow.status == "ACTIVE")
+        .order_by(PlanRow.created_at.desc())
+        .limit(1)
     )
     research_step = None
     if plan is not None:
         research_step = db.scalar(
-            select(PlanStepRow).where(
-                PlanStepRow.plan_id == plan.id, PlanStepRow.step_type == "research"
-            ).order_by(PlanStepRow.sequence).limit(1)
+            select(PlanStepRow)
+            .where(PlanStepRow.plan_id == plan.id, PlanStepRow.step_type == "research")
+            .order_by(PlanStepRow.sequence)
+            .limit(1)
         )
     if research_step is None:
-        logger.error("Task %s in RESEARCHING but its active plan has no research step", task.id)
+        logger.error(
+            "Task %s in RESEARCHING but its active plan has no research step", task.id
+        )
         return _cas_transition(
             db, task.id, TaskStatus.RESEARCHING, TaskStatus.FAILED, "no_research_step"
         )
@@ -483,7 +512,11 @@ async def _run_researching(db: Session, task: Task, researcher) -> TaskStatus:
         )
     logger.info("Task %s -> IMPLEMENTING (research artifact persisted)", task.id)
     return _cas_transition(
-        db, task.id, TaskStatus.RESEARCHING, TaskStatus.IMPLEMENTING, "artifact_persisted"
+        db,
+        task.id,
+        TaskStatus.RESEARCHING,
+        TaskStatus.IMPLEMENTING,
+        "artifact_persisted",
     )
 
 
@@ -501,7 +534,11 @@ async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
     if developer is None:
         logger.error("Task %s in IMPLEMENTING but no developer agent", task.id)
         return _cas_transition(
-            db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "no_developer_agent"
+            db,
+            task.id,
+            TaskStatus.IMPLEMENTING,
+            TaskStatus.FAILED,
+            "no_developer_agent",
         )
 
     from app.agents.developer.agent import DeveloperError
@@ -512,31 +549,41 @@ async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
     from app.tools.base import ExecutionContext
 
     plan = db.scalar(
-        select(PlanRow).where(
-            PlanRow.task_id == task.id, PlanRow.status == "ACTIVE"
-        ).order_by(PlanRow.created_at.desc()).limit(1)
+        select(PlanRow)
+        .where(PlanRow.task_id == task.id, PlanRow.status == "ACTIVE")
+        .order_by(PlanRow.created_at.desc())
+        .limit(1)
     )
     implement_step = None
     if plan is not None:
         implement_step = db.scalar(
-            select(PlanStepRow).where(
-                PlanStepRow.plan_id == plan.id, PlanStepRow.step_type == "implement"
-            ).order_by(PlanStepRow.sequence).limit(1)
+            select(PlanStepRow)
+            .where(PlanStepRow.plan_id == plan.id, PlanStepRow.step_type == "implement")
+            .order_by(PlanStepRow.sequence)
+            .limit(1)
         )
     if implement_step is None:
-        logger.error("Task %s in IMPLEMENTING but its active plan has no implement step", task.id)
+        logger.error(
+            "Task %s in IMPLEMENTING but its active plan has no implement step", task.id
+        )
         return _cas_transition(
             db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "no_implement_step"
         )
 
     artifact = db.scalar(
-        select(ArtifactRow).where(ArtifactRow.task_id == task.id)
-        .order_by(ArtifactRow.created_at.desc()).limit(1)
+        select(ArtifactRow)
+        .where(ArtifactRow.task_id == task.id)
+        .order_by(ArtifactRow.created_at.desc())
+        .limit(1)
     )
     if artifact is None:
         logger.error("Task %s in IMPLEMENTING but no research artifact exists", task.id)
         return _cas_transition(
-            db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "no_research_artifact"
+            db,
+            task.id,
+            TaskStatus.IMPLEMENTING,
+            TaskStatus.FAILED,
+            "no_research_artifact",
         )
 
     # A replan after debugging/review/security carries that source's CONCRETE
@@ -559,7 +606,11 @@ async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
     except (LLMTimeoutError, LLMMalformedOutputError) as exc:
         logger.error("Task %s developer LLM error: %s", task.id, exc)
         return _cas_transition(
-            db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.FAILED, "developer_llm_error"
+            db,
+            task.id,
+            TaskStatus.IMPLEMENTING,
+            TaskStatus.FAILED,
+            "developer_llm_error",
         )
     except Exception:  # noqa: BLE001 — never hang, never silently continue
         logger.exception("Task %s developer crashed", task.id)
@@ -568,7 +619,11 @@ async def _run_implementing(db: Session, task: Task, developer) -> TaskStatus:
         )
     logger.info("Task %s -> TESTING (implementation summary persisted)", task.id)
     return _cas_transition(
-        db, task.id, TaskStatus.IMPLEMENTING, TaskStatus.TESTING, "implementation_persisted"
+        db,
+        task.id,
+        TaskStatus.IMPLEMENTING,
+        TaskStatus.TESTING,
+        "implementation_persisted",
     )
 
 
@@ -614,14 +669,18 @@ async def _run_testing(db: Session, task: Task, tester) -> TaskStatus:
     if result.status == "passed":
         logger.info(
             "Task %s -> REVIEWING (tests passed: %d passed, %dms)",
-            task.id, result.passed, result.duration_ms,
+            task.id,
+            result.passed,
+            result.duration_ms,
         )
         return _cas_transition(
             db, task.id, TaskStatus.TESTING, TaskStatus.REVIEWING, "tests_passed"
         )
     logger.info(
         "Task %s -> DEBUGGING (tests %s: %d failed)",
-        task.id, result.status, result.failed,
+        task.id,
+        result.status,
+        result.failed,
     )
     return _cas_transition(
         db, task.id, TaskStatus.TESTING, TaskStatus.DEBUGGING, f"tests_{result.status}"
@@ -658,8 +717,10 @@ async def _run_debugging(db: Session, task: Task, debugger) -> TaskStatus:
     from app.tools.base import ExecutionContext
 
     run = db.scalar(
-        select(TestRun).where(TestRun.task_id == task.id)
-        .order_by(TestRun.created_at.desc(), TestRun.id.desc()).limit(1)
+        select(TestRun)
+        .where(TestRun.task_id == task.id)
+        .order_by(TestRun.created_at.desc(), TestRun.id.desc())
+        .limit(1)
     )
     if run is None:
         logger.error("Task %s in DEBUGGING but no test run exists", task.id)
@@ -667,22 +728,26 @@ async def _run_debugging(db: Session, task: Task, debugger) -> TaskStatus:
             db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED, "no_test_run"
         )
     summary = db.scalar(
-        select(SummaryRow).where(SummaryRow.task_id == task.id)
-        .order_by(SummaryRow.created_at.desc()).limit(1)
+        select(SummaryRow)
+        .where(SummaryRow.task_id == task.id)
+        .order_by(SummaryRow.created_at.desc())
+        .limit(1)
     )
     if summary is None:
         logger.error(
             "Task %s in DEBUGGING but no implementation summary exists", task.id
         )
         return _cas_transition(
-            db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED, "no_implementation_summary"
+            db,
+            task.id,
+            TaskStatus.DEBUGGING,
+            TaskStatus.FAILED,
+            "no_implementation_summary",
         )
 
     ctx = ExecutionContext(task_id=task.id, agent_type="debugger", db=db)
     try:
-        classification = await debugger.run(
-            task, result_from_row(run), summary, ctx
-        )
+        classification = await debugger.run(task, result_from_row(run), summary, ctx)
     except DebuggerError as exc:
         logger.error("Task %s debugging failed: %s", task.id, exc)
         return _cas_transition(
@@ -710,10 +775,15 @@ async def _run_debugging(db: Session, task: Task, debugger) -> TaskStatus:
     if not classification.fixable:
         logger.info(
             "Task %s -> FAILED (unfixable %s: %s)",
-            task.id, classification.category, classification.root_cause[:200],
+            task.id,
+            classification.category,
+            classification.root_cause[:200],
         )
         return _cas_transition(
-            db, task.id, TaskStatus.DEBUGGING, TaskStatus.FAILED,
+            db,
+            task.id,
+            TaskStatus.DEBUGGING,
+            TaskStatus.FAILED,
             f"unfixable:{classification.category}",
         )
 
@@ -757,20 +827,27 @@ async def _run_reviewing(db: Session, task: Task, reviewer) -> TaskStatus:
     from app.tools.base import ExecutionContext
 
     summary = db.scalar(
-        select(SummaryRow).where(SummaryRow.task_id == task.id)
-        .order_by(SummaryRow.created_at.desc(), SummaryRow.id.desc()).limit(1)
+        select(SummaryRow)
+        .where(SummaryRow.task_id == task.id)
+        .order_by(SummaryRow.created_at.desc(), SummaryRow.id.desc())
+        .limit(1)
     )
     if summary is None or not summary.commit_sha:
         logger.error(
             "Task %s in REVIEWING but no implementation summary with a commit", task.id
         )
         return _cas_transition(
-            db, task.id, TaskStatus.REVIEWING, TaskStatus.FAILED,
+            db,
+            task.id,
+            TaskStatus.REVIEWING,
+            TaskStatus.FAILED,
             "no_implementation_summary",
         )
     run = db.scalar(
-        select(TestRun).where(TestRun.task_id == task.id)
-        .order_by(TestRun.created_at.desc(), TestRun.id.desc()).limit(1)
+        select(TestRun)
+        .where(TestRun.task_id == task.id)
+        .order_by(TestRun.created_at.desc(), TestRun.id.desc())
+        .limit(1)
     )
     if run is None:
         logger.error("Task %s in REVIEWING but no test run exists", task.id)
@@ -800,7 +877,10 @@ async def _run_reviewing(db: Session, task: Task, reviewer) -> TaskStatus:
     if review.decision == "APPROVE":
         logger.info("Task %s -> SECURITY_REVIEW (review approved)", task.id)
         return _cas_transition(
-            db, task.id, TaskStatus.REVIEWING, TaskStatus.SECURITY_REVIEW,
+            db,
+            task.id,
+            TaskStatus.REVIEWING,
+            TaskStatus.SECURITY_REVIEW,
             "review_approved",
         )
     reason = (
@@ -808,9 +888,7 @@ async def _run_reviewing(db: Session, task: Task, reviewer) -> TaskStatus:
         if review.decision == "REQUEST_CHANGES"
         else "review_rejected"
     )
-    logger.info(
-        "Task %s -> IMPLEMENTING (review %s)", task.id, review.decision
-    )
+    logger.info("Task %s -> IMPLEMENTING (review %s)", task.id, review.decision)
     return _replan_to_implementing(
         db, task.id, expected=TaskStatus.REVIEWING, reason=reason
     )
@@ -828,7 +906,10 @@ async def _run_security_review(db: Session, task: Task, security) -> TaskStatus:
     if security is None:
         logger.error("Task %s in SECURITY_REVIEW but no security agent", task.id)
         return _cas_transition(
-            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            db,
+            task.id,
+            TaskStatus.SECURITY_REVIEW,
+            TaskStatus.FAILED,
             "no_security_agent",
         )
 
@@ -838,8 +919,10 @@ async def _run_security_review(db: Session, task: Task, security) -> TaskStatus:
     from app.tools.base import ExecutionContext
 
     summary = db.scalar(
-        select(SummaryRow).where(SummaryRow.task_id == task.id)
-        .order_by(SummaryRow.created_at.desc(), SummaryRow.id.desc()).limit(1)
+        select(SummaryRow)
+        .where(SummaryRow.task_id == task.id)
+        .order_by(SummaryRow.created_at.desc(), SummaryRow.id.desc())
+        .limit(1)
     )
     if summary is None or not summary.commit_sha:
         logger.error(
@@ -847,7 +930,10 @@ async def _run_security_review(db: Session, task: Task, security) -> TaskStatus:
             task.id,
         )
         return _cas_transition(
-            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            db,
+            task.id,
+            TaskStatus.SECURITY_REVIEW,
+            TaskStatus.FAILED,
             "no_implementation_summary",
         )
 
@@ -857,31 +943,44 @@ async def _run_security_review(db: Session, task: Task, security) -> TaskStatus:
     except SecurityError as exc:
         logger.error("Task %s security review failed: %s", task.id, exc)
         return _cas_transition(
-            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            db,
+            task.id,
+            TaskStatus.SECURITY_REVIEW,
+            TaskStatus.FAILED,
             "security_failed",
         )
     except (LLMTimeoutError, LLMMalformedOutputError) as exc:
         logger.error("Task %s security LLM error: %s", task.id, exc)
         return _cas_transition(
-            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            db,
+            task.id,
+            TaskStatus.SECURITY_REVIEW,
+            TaskStatus.FAILED,
             "security_llm_error",
         )
     except Exception:  # noqa: BLE001 — never hang, never silently continue
         logger.exception("Task %s security agent crashed", task.id)
         return _cas_transition(
-            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.FAILED,
+            db,
+            task.id,
+            TaskStatus.SECURITY_REVIEW,
+            TaskStatus.FAILED,
             "security_error",
         )
 
     if result.decision == "PASS":
         logger.info("Task %s -> VERIFICATION (security passed)", task.id)
         return _cas_transition(
-            db, task.id, TaskStatus.SECURITY_REVIEW, TaskStatus.VERIFICATION,
+            db,
+            task.id,
+            TaskStatus.SECURITY_REVIEW,
+            TaskStatus.VERIFICATION,
             "security_passed",
         )
     logger.info(
         "Task %s -> IMPLEMENTING (security failed: %d findings)",
-        task.id, len(result.findings),
+        task.id,
+        len(result.findings),
     )
     return _replan_to_implementing(
         db, task.id, expected=TaskStatus.SECURITY_REVIEW, reason="security_failed"
@@ -908,8 +1007,10 @@ async def _run_verification(db: Session, task: Task) -> TaskStatus:
     from app.models import TestRun
 
     summary = db.scalar(
-        select(SummaryRow).where(SummaryRow.task_id == task.id)
-        .order_by(SummaryRow.created_at.desc(), SummaryRow.id.desc()).limit(1)
+        select(SummaryRow)
+        .where(SummaryRow.task_id == task.id)
+        .order_by(SummaryRow.created_at.desc(), SummaryRow.id.desc())
+        .limit(1)
     )
     if summary is None or not summary.commit_sha:
         logger.error(
@@ -917,19 +1018,26 @@ async def _run_verification(db: Session, task: Task) -> TaskStatus:
             task.id,
         )
         return _cas_transition(
-            db, task.id, TaskStatus.VERIFICATION, TaskStatus.FAILED,
+            db,
+            task.id,
+            TaskStatus.VERIFICATION,
+            TaskStatus.FAILED,
             "no_implementation_summary",
         )
 
     run = db.scalar(
-        select(TestRun).where(TestRun.task_id == task.id)
-        .order_by(TestRun.created_at.desc(), TestRun.id.desc()).limit(1)
+        select(TestRun)
+        .where(TestRun.task_id == task.id)
+        .order_by(TestRun.created_at.desc(), TestRun.id.desc())
+        .limit(1)
     )
     tests_still_pass = run is not None and run.status == "passed"
     if not tests_still_pass:
         logger.warning(
             "Task %s verification stale: last test run is %s, not passed — "
-            "back to TESTING", task.id, getattr(run, "status", None),
+            "back to TESTING",
+            task.id,
+            getattr(run, "status", None),
         )
         return _cas_transition(
             db, task.id, TaskStatus.VERIFICATION, TaskStatus.TESTING, "stale_review"
@@ -948,7 +1056,10 @@ async def _run_verification(db: Session, task: Task) -> TaskStatus:
     if head != summary.commit_sha:
         logger.warning(
             "Task %s verification stale: HEAD %s != reviewed commit %s — "
-            "back to TESTING", task.id, head, summary.commit_sha,
+            "back to TESTING",
+            task.id,
+            head,
+            summary.commit_sha,
         )
         return _cas_transition(
             db, task.id, TaskStatus.VERIFICATION, TaskStatus.TESTING, "stale_review"
@@ -956,6 +1067,71 @@ async def _run_verification(db: Session, task: Task) -> TaskStatus:
 
     logger.info("Task %s -> PR_CREATION (verification passed)", task.id)
     return _cas_transition(
-        db, task.id, TaskStatus.VERIFICATION, TaskStatus.PR_CREATION,
+        db,
+        task.id,
+        TaskStatus.VERIFICATION,
+        TaskStatus.PR_CREATION,
         "verification_passed",
     )
+
+
+async def _run_pr_creation(db: Session, task: Task, github) -> TaskStatus:
+    """PR_CREATION (Phase 10): the deterministic GitHub Agent, or a clean
+    FAILED (no GitHub client configured).
+
+    The GitHub Agent needs NO LLM and makes no judgment call on whether to
+    open a PR — the Reviewer + Security gates and VERIFICATION already
+    decided. ``PR_CREATION -> AWAITING_APPROVAL`` is UNCONDITIONAL once the
+    PR row is persisted; there is no "the PR creation itself needs review".
+
+    The PR row is persisted inside the agent; the transition fires only
+    after that, under a fresh row lock (compare-and-swap) so a concurrent
+    worker cannot double-create or double-transition.
+    """
+    if github is None:
+        logger.error("Task %s in PR_CREATION but no GitHub agent", task.id)
+        return _cas_transition(
+            db,
+            task.id,
+            TaskStatus.PR_CREATION,
+            TaskStatus.FAILED,
+            "no_github_client",
+        )
+
+    from app.agents.github_agent.agent import GitHubAgentError
+    from app.tools.base import ExecutionContext
+
+    ctx = ExecutionContext(task_id=task.id, agent_type="github", db=db)
+    try:
+        await github.run(task, ctx)
+    except GitHubAgentError as exc:
+        logger.error("Task %s PR creation failed: %s", task.id, exc)
+        return _cas_transition(
+            db, task.id, TaskStatus.PR_CREATION, TaskStatus.FAILED, "github_failed"
+        )
+    except Exception:  # noqa: BLE001 — never hang, never silently continue
+        logger.exception("Task %s GitHub agent crashed", task.id)
+        return _cas_transition(
+            db, task.id, TaskStatus.PR_CREATION, TaskStatus.FAILED, "github_error"
+        )
+    logger.info("Task %s -> AWAITING_APPROVAL (draft PR persisted)", task.id)
+    return _cas_transition(
+        db,
+        task.id,
+        TaskStatus.PR_CREATION,
+        TaskStatus.AWAITING_APPROVAL,
+        "pr_created",
+    )
+
+
+async def _run_awaiting_approval(db: Session, task: Task) -> None:
+    """AWAITING_APPROVAL is a genuine human checkpoint: TERMINAL-UNTIL-HUMAN.
+
+    Nothing in the worker/state machine auto-advances it. This runner exists
+    so a re-enqueued job (e.g. the startup sweep) finds a no-op and ends —
+    the task stays parked until the API ``approve`` / ``reject`` endpoints
+    move it (-> COMPLETED on approve, -> FAILED on reject, both via a fresh
+    row lock in the route handler). No transition is applied here.
+    """
+    logger.info("Task %s in AWAITING_APPROVAL — awaiting a human decision", task.id)
+    return None
