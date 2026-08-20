@@ -17,6 +17,11 @@ _TMP_DB.close()
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP_DB.name.replace(os.sep, '/')}"
 os.environ["ENVIRONMENT"] = "test"
 os.environ["LOG_LEVEL"] = "WARNING"
+# Phase 10.5: a known bearer token for the mutating routes. The ``client``
+# fixture injects it by default so positive-path tests stay unchanged; the
+# auth test module exercises the 401 paths via a bare client / per-request
+# override.
+os.environ["FORGEMIND_API_TOKEN"] = "test-token"
 # Hermetic unit tests: the API must not touch Redis. Tasks stay CREATED and
 # the worker's startup sweep would collect them if a queue existed.
 os.environ["QUEUE_ENABLED"] = "false"
@@ -26,6 +31,7 @@ os.environ["REPO_CACHE_DIR"] = tempfile.mkdtemp(prefix="forgemind-test-cache-")
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.config import get_settings  # noqa: E402
 from app.database.session import SessionLocal, engine  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Base  # noqa: E402
@@ -33,10 +39,17 @@ from app.models import Base  # noqa: E402
 
 @pytest.fixture()
 def client():
-    """TestClient with a fresh schema per test; lifespan runs the DB check."""
+    """TestClient with a fresh schema per test; lifespan runs the DB check.
+
+    Defaults the ``Authorization: Bearer`` header from the configured token
+    so every existing mutating-route test keeps working unchanged. Override
+    per-request (e.g. ``headers={"Authorization": "Bearer wrong"}``) to
+    exercise the 401 paths.
+    """
     Base.metadata.create_all(engine)
     app = create_app()
-    with TestClient(app) as test_client:
+    token = get_settings().api_token
+    with TestClient(app, headers={"Authorization": f"Bearer {token}"}) as test_client:
         yield test_client
     Base.metadata.drop_all(engine)
 

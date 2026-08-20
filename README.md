@@ -53,19 +53,25 @@ uvicorn app.main:app --reload
 # arq app.worker.worker.WorkerSettings
 ```
 
-Then:
+Then (mutating calls need the bearer token — dev fallback shown inline):
 
 ```bash
+# A single shared-secret token gates the mutating routes (Phase 10.5).
+AUTH="Authorization: Bearer ${FORGEMIND_API_TOKEN:-forgemind-dev-token}"
+
 curl -X POST localhost:8000/tasks \
   -H 'Content-Type: application/json' \
-  -d '{"objective": "Fix the flaky test in auth", "repository_url": "https://github.com/org/repo.git"}'
+  -H "$AUTH" \
+  -d '{"objective": "Fix the flaky test in auth", "repository_url": "https://github.com/org/repo.git", "fork_url": "https://github.com/you/org-fork.git"}'
 # -> 201 {"id": "...", "status": "CREATED", ...}  (advance_task job enqueued)
 
-curl localhost:8000/tasks                # list
-curl localhost:8000/tasks/{id}           # fetch one — watch status walk to COMPLETED
+curl localhost:8000/tasks                # list        (open — no token needed)
+curl localhost:8000/tasks/{id}           # fetch one — watch status walk to AWAITING_APPROVAL
 curl localhost:8000/tasks/{id}/events    # ordered execution-event trail
-curl -X POST localhost:8000/tasks/{id}/cancel   # -> FAILED (user_cancelled); 409 on terminal tasks
-curl localhost:8000/health               # {"status": "ok"}
+curl -X POST localhost:8000/tasks/{id}/cancel -H "$AUTH"   # -> FAILED (user_cancelled); 409 on terminal tasks
+curl -X POST localhost:8000/tasks/{id}/approve -H "$AUTH"  # human checks out the draft PR, then approves -> COMPLETED
+curl -X POST localhost:8000/tasks/{id}/reject -H "$AUTH"   # human rejects -> FAILED (deliberate stop)
+curl localhost:8000/health               # {"status": "ok"}   (open)
 ```
 
 ## Tests
@@ -222,6 +228,34 @@ Tables (architecture doc section G, milestone scope): `tasks`, `plans` (incl.
 `research_artifacts`. Remaining Section-G tables arrive with the phases that use them
 (agents/eval). Tasks default to a bounded replan budget (`max_replans=3`) — Section D's
 "budget exhausted → ESCALATED" is enforced even when the API client sets no budget.
+
+## Authentication
+
+The mutating API routes (`POST /tasks`, `POST /tasks/{id}/cancel`,
+`POST /tasks/{id}/approve`, `POST /tasks/{id}/reject`) are gated by a **single
+shared-secret bearer token** (Phase 10.5). Read routes (`GET /tasks`,
+`GET /tasks/{id}`, `GET /tasks/{id}/events`) and `/health` stay open so a human
+can watch a task walk the pipeline without the token.
+
+- **Env var**: `FORGEMIND_API_TOKEN`. Send it as
+  `Authorization: Bearer <token>` on every mutating call.
+- **Dev/test default**: unset, `FORGEMIND_API_TOKEN` falls back to
+  `forgemind-dev-token` so key-less local development and the hermetic suite
+  work out of the box.
+- **Production fails closed**: with `ENVIRONMENT=production` and no
+  `FORGEMIND_API_TOKEN`, the API **refuses to start** rather than silently
+  serving unauthenticated mutating routes.
+- **Audit trail**: token-authenticated actions are recorded with actor
+  `token-holder` (`task.approve`, `task.reject`, `task.cancelled`) — the one
+  place that authorizes real-world side effects (a PR-approval decision) has no
+  author gap.
+- **Constant-time compare**: the token is checked with
+  `secrets.compare_digest`, never a plain `==`.
+
+Scope is deliberately **single-operator, single shared secret** — matching the
+project's current milestone. Out of scope (future work, not built): multi-user
+accounts, OAuth / GitHub-login approval, per-task granular permissions, and
+token rotation/expiry.
 
 ## Security posture
 

@@ -109,21 +109,25 @@ uvicorn app.main:app --reload
 # arq app.worker.worker.WorkerSettings
 ```
 
-Then:
+Then (mutating calls need the bearer token — Phase 10.5; dev fallback shown):
 
 ```bash
+# A single shared-secret token gates create/cancel/approve/reject.
+AUTH="Authorization: Bearer ${FORGEMIND_API_TOKEN:-forgemind-dev-token}"
+
 curl -X POST localhost:8000/tasks \
   -H 'Content-Type: application/json' \
+  -H "$AUTH" \
   -d '{"objective": "Fix the flaky test in auth", "repository_url": "https://github.com/org/repo.git", "fork_url": "https://github.com/you/org-fork.git"}'
 # -> 201 {"id": "...", "status": "CREATED", ...}  (advance_task job enqueued)
 
-curl localhost:8000/tasks                # list
+curl localhost:8000/tasks                # list        (open — no token needed)
 curl localhost:8000/tasks/{id}           # fetch one — watch status walk to AWAITING_APPROVAL
 curl localhost:8000/tasks/{id}/events    # ordered execution-event trail
-curl -X POST localhost:8000/tasks/{id}/cancel   # -> FAILED (user_cancelled); 409 on terminal tasks
-curl -X POST localhost:8000/tasks/{id}/approve  # human checks out the draft PR, then approves -> COMPLETED
-curl -X POST localhost:8000/tasks/{id}/reject   # human rejects -> FAILED (deliberate stop)
-curl localhost:8000/health               # {"status": "ok"}
+curl -X POST localhost:8000/tasks/{id}/cancel -H "$AUTH"   # -> FAILED (user_cancelled); 409 on terminal tasks
+curl -X POST localhost:8000/tasks/{id}/approve -H "$AUTH"  # human checks out the draft PR, then approves -> COMPLETED
+curl -X POST localhost:8000/tasks/{id}/reject -H "$AUTH"   # human rejects -> FAILED (deliberate stop)
+curl localhost:8000/health               # {"status": "ok"}   (open)
 ```
 
 ## Tests
@@ -376,10 +380,14 @@ and a human signs off.
    enforced by construction: unset `fork_url` fails `create_pr` closed; `fork_url == url`
    raises SecurityError; a smuggled `owner`/`repo`/`head`/`base` is rejected at validation;
    and the suite asserts there is NO `github.merge` tool in the registry at all.
-3. **The approve/reject endpoints are unauthenticated — a known gap.** This is deliberate
-   for the single-operator MVP: there are no user accounts yet, so any caller who can reach
-   the API can approve. It is flagged in the code and here; auth/authz is the first thing a
-   multi-user build must add.
+3. **The approve/reject endpoints are bearer-token gated (Phase 10.5).** A single
+   shared secret (`FORGEMIND_API_TOKEN`) gates every mutating route —
+   `POST /tasks`, cancel, approve, reject — with a constant-time compare and the
+   authenticated identity recorded on the audit trail (`actor="token-holder"`).
+   This is deliberately NOT multi-user auth: there are no user accounts, so any
+   caller holding the token can approve. That matches the single-operator MVP and
+   removes the old "anyone who can reach the API can approve" gap; per-account
+   auth/authz is the first thing a multi-user build must add.
 4. **Draft-PR-as-second-layer felt sufficient for the MVP.** The gate is not the PR review —
    it is AWAITING_APPROVAL plus the structural fact that the system physically cannot merge.
    The draft adds a real place for human review on GitHub's own surface before the operator
@@ -482,6 +490,18 @@ Tables (architecture doc section G, milestone scope): `tasks`, `plans` (incl.
 them (agents/eval). Tasks default to a bounded replan budget
 (`max_replans=3`) — Section D's "budget exhausted → ESCALATED" is enforced even when the API
 client sets no budget.
+
+## Authentication
+
+The mutating API routes (`POST /tasks`, cancel, approve, reject) are gated by a
+**single shared-secret bearer token** (Phase 10.5). Read routes and `/health`
+stay open. `FORGEMIND_API_TOKEN` (sent as `Authorization: Bearer <token>`)
+defaults to `forgemind-dev-token` outside production; **production fails
+closed** — the API refuses to start without an explicit token. The comparison
+uses `secrets.compare_digest`, and token-authenticated actions are audited as
+`actor="token-holder"` (there are no user accounts — single-operator scope).
+Deliberately out of scope: multi-user accounts, OAuth/GitHub-login approval,
+per-task permissions, token rotation/expiry.
 
 ## Security posture
 

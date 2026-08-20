@@ -10,8 +10,14 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Fallback bearer token for development/test when FORGEMIND_API_TOKEN is
+# unset. Deterministic so curl examples, docs, and hermetic tests can rely on
+# it. Production has NO default — it FAILS CLOSED at startup instead (see
+# ``Settings._ensure_api_token``).
+DEV_API_TOKEN = "forgemind-dev-token"
 
 
 class Settings(BaseSettings):
@@ -26,6 +32,18 @@ class Settings(BaseSettings):
     app_name: str = "forgemind"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
+
+    # API auth (Phase 10.5): a SINGLE shared-secret bearer token gating the
+    # mutating routes (POST /tasks, cancel, approve, reject) — single-operator
+    # scope, no user accounts. Loaded from FORGEMIND_API_TOKEN only (the env
+    # var name is set via validation_alias below), never hardcoded, never
+    # logged. Falls back to DEV_API_TOKEN in development/test; production with
+    # no token refuses to start (see ``_ensure_api_token``).
+    api_token: str | None = Field(
+        default=None,
+        validation_alias="FORGEMIND_API_TOKEN",
+        description="Bearer token for mutating API routes (secret — never logged).",
+    )
 
     # SQLAlchemy URL. Local dev uses the docker-compose Postgres; production
     # points at Supabase Postgres (postgresql+psycopg://...). The password is
@@ -148,6 +166,24 @@ class Settings(BaseSettings):
         default=3,
         description="Bounded transient (429/5xx/timeout) retries per GitHub call.",
     )
+
+    @model_validator(mode="after")
+    def _ensure_api_token(self) -> "Settings":
+        """Fail closed: no API runs in production without an explicit token.
+
+        In development/test an unset token falls back to ``DEV_API_TOKEN`` so
+        key-less dev and the hermetic suite still work. In production a missing
+        token raises at config load — the API process refuses to start rather
+        than silently serving unauthenticated mutating routes.
+        """
+        if not self.api_token:
+            if self.environment == "production":
+                raise ValueError(
+                    "FORGEMIND_API_TOKEN must be set when ENVIRONMENT=production — "
+                    "refusing to run the API unauthenticated."
+                )
+            self.api_token = DEV_API_TOKEN
+        return self
 
 
 @lru_cache

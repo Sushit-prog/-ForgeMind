@@ -1,10 +1,18 @@
-"""Task API routes (Phase 1 + Phase 2 contracts).
+"""Task API routes (Phase 1 + Phase 2 contracts, Phase 10.5 auth).
 
-POST /tasks                {objective, repository_url} -> 201, enqueues advance_task
-GET  /tasks                -> list of tasks
-GET  /tasks/{id}           -> full task record
-POST /tasks/{id}/cancel    -> transition to FAILED ("user_cancelled"), enqueues nothing
-GET  /tasks/{id}/events    -> execution_events, ordered by created_at
+POST /tasks                {objective, repository_url} -> 201, enqueues advance_task  [auth]
+GET  /tasks                -> list of tasks                                            [open]
+GET  /tasks/{id}           -> full task record                                          [open]
+POST /tasks/{id}/cancel    -> transition to FAILED ("user_cancelled"), enqueues nothing [auth]
+POST /tasks/{id}/approve   -> COMPLETED (human yes at the checkpoint)                   [auth]
+POST /tasks/{id}/reject    -> FAILED (human no at the checkpoint)                       [auth]
+GET  /tasks/{id}/events    -> execution_events, ordered by created_at                   [open]
+
+Every state-mutating route is gated by the shared bearer token
+(``require_api_token``) and writes the authenticated identity ("token-holder")
+to the audit trail — the one place that authorizes real-world side effects
+must not have an author gap. Read routes stay open so a human can watch a task
+walk the pipeline without the token.
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.deps.auth import TOKEN_HOLDER, require_api_token
 from app.database.session import get_db
 from app.models import (
     Approval,
@@ -50,9 +59,18 @@ def _get_or_create_repository(db: Session, url: str) -> Repository:
     return repo
 
 
-@router.post("", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=TaskRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_api_token)],
+)
 async def create_task(payload: TaskCreate, db: Session = Depends(get_db)) -> Task:
-    """Create a task in CREATED state, record an audit entry, enqueue the worker."""
+    """Create a task in CREATED state, record an audit entry, enqueue the worker.
+
+    Bearer-token gated: creating a task triggers real LLM spend once the
+    worker picks it up, so it is never an anonymous action.
+    """
     repository = _get_or_create_repository(db, payload.repository_url)
     # Phase 10: the fork ForgeMind will push/PR against (stored on the repo
     # row and shared by its tasks). Unset fork_url means PR_CREATION fails
@@ -124,13 +142,20 @@ def get_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
     return task
 
 
-@router.post("/{task_id}/cancel", response_model=TaskRead)
-def cancel_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
+@router.post(
+    "/{task_id}/cancel",
+    response_model=TaskRead,
+)
+def cancel_task(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_api_token),
+) -> Task:
     """Cancel a task: transition to FAILED with reason ``user_cancelled``.
 
     Row-locked so it cannot race a worker transition. Terminal tasks
     (COMPLETED/ESCALATED) and already-FAILED tasks return 409 — never a
-    silent no-op.
+    silent no-op. The authenticated actor is recorded on the audit trail.
     """
     task = db.execute(
         select(Task).where(Task.id == task_id).with_for_update()
@@ -146,6 +171,16 @@ def cancel_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
         )
 
     transition_task(db, task, TaskStatus.FAILED, reason=USER_CANCELLED)
+    db.add(
+        AuditLog(
+            task_id=task.id,
+            actor=actor,
+            action="task.cancelled",
+            entity_type="task",
+            entity_id=str(task.id),
+            details={"reason": USER_CANCELLED},
+        )
+    )
     db.commit()
     db.refresh(task)
     logger.info("Task %s cancelled by user (%s -> FAILED)", task.id, current.value)
@@ -181,9 +216,15 @@ def _record_approval(
     task: Task,
     action: str,
     reason: str | None,
-    actor: str = "user",
+    actor: str = TOKEN_HOLDER,
 ) -> None:
-    """Insert the human decision row + match the PR row's status."""
+    """Insert the human decision row + match the PR row's status.
+
+    ``actor`` is the authenticated identity from ``require_api_token`` — with
+    the single shared token that is ``TOKEN_HOLDER``; the audit trail records
+    *who* approved/rejected (the bearer holder) so the one action that
+    authorizes real-world side effects has no author gap.
+    """
     db.add(
         Approval(task_id=task.id, action=action, reason=reason),
     )
@@ -215,22 +256,23 @@ def approve_task(
     task_id: uuid.UUID,
     payload: ApprovalRequest | None = None,
     db: Session = Depends(get_db),
+    actor: str = Depends(require_api_token),
 ) -> Task:
     """The human 'yes' at the AWAITING_APPROVAL checkpoint.
 
-    Records an ``approvals`` row (action=approve) and transitions the task
-    to COMPLETED. Per section 18/13 this does NOT merge anything — merging
-    remains a manual action on GitHub. Approval means "I reviewed
-    ForgeMind's PR and consider the task done".
+    Bearer-token gated. Records an ``approvals`` row (action=approve) and
+    transitions the task to COMPLETED. Per section 18/13 this does NOT merge
+    anything — merging remains a manual action on GitHub. Approval means
+    "I reviewed ForgeMind's PR and consider the task done".
 
-    KNOWN GAP (deliberate for the single-operator MVP): this endpoint is
-    NOT authenticated/authorized — there are no user accounts yet. Any
-    caller who can reach the API can approve. Acceptable for a portfolio
-    project, but it is a real limitation and is flagged, not hidden.
+    SCOPE: the token is a SINGLE shared secret, so "who" is the token holder,
+    not an individual user. That matches the single-operator MVP; multi-user
+    authorization (per-account, per-task) is future work and is documented as
+    such in the README.
     """
     task, current = _await_approval_lock(db, task_id, "approve")
     reason = payload.reason if payload else None
-    _record_approval(db, task, "approve", reason)
+    _record_approval(db, task, "approve", reason, actor=actor)
     transition_task(db, task, TaskStatus.COMPLETED, reason="user_approved")
     db.commit()
     db.refresh(task)
@@ -243,19 +285,18 @@ def reject_task(
     task_id: uuid.UUID,
     payload: ApprovalRequest | None = None,
     db: Session = Depends(get_db),
+    actor: str = Depends(require_api_token),
 ) -> Task:
     """The human 'no' at the AWAITING_APPROVAL checkpoint.
 
-    Records an ``approvals`` row (action=reject) and transitions the task
-    to FAILED — a deliberate stop, NOT a replan. A human rejection at this
-    final stage means "do not auto-fix this by looping back in"; the reason
-    is preserved on the event and the approval row.
-
-    Same KNOWN GAP as approve: unauthenticated in this MVP (see approve).
+    Bearer-token gated. Records an ``approvals`` row (action=reject) and
+    transitions the task to FAILED — a deliberate stop, NOT a replan. Reason
+    preserved on the event and the approval row. Same single-token scope as
+    ``approve``.
     """
     task, current = _await_approval_lock(db, task_id, "reject")
     reason = payload.reason if payload else None
-    _record_approval(db, task, "reject", reason)
+    _record_approval(db, task, "reject", reason, actor=actor)
     transition_task(
         db,
         task,

@@ -28,6 +28,10 @@ os.environ["DATABASE_URL"] = (
 os.environ["REDIS_URL"] = "redis://localhost:6379/0"
 os.environ["ENVIRONMENT"] = "test"
 os.environ["LOG_LEVEL"] = "WARNING"
+# Phase 10.5: a known bearer token for the mutating routes. The ``client``
+# fixture injects it by default (worker subprocesses never call the API, so
+# spawn_worker needs no token).
+os.environ["FORGEMIND_API_TOKEN"] = "test-token"
 os.environ["QUEUE_ENABLED"] = "true"
 os.environ["WORKER_SWEEP_ENABLED"] = "true"
 os.environ["REPO_CACHE_DIR"] = tempfile.mkdtemp(prefix="forgemind-e2e-cache-")
@@ -36,6 +40,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
+from app.config import get_settings  # noqa: E402
 from app.database.session import SessionLocal, engine  # noqa: E402
 from app.main import create_app  # noqa: E402
 
@@ -85,7 +90,8 @@ def client():
     _truncate_all()
     _flush_redis()
     app = create_app()
-    with TestClient(app) as test_client:
+    token = get_settings().api_token
+    with TestClient(app, headers={"Authorization": f"Bearer {token}"}) as test_client:
         yield test_client
     _truncate_all()
     _flush_redis()
