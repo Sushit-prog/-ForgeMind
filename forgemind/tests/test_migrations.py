@@ -2,6 +2,13 @@
 
 Uses a fresh file-based SQLite DB so no Postgres is required. The migration
 itself is the same one used for Postgres (JSONB falls back to JSON).
+
+The URL is passed to Alembic DIRECTLY via ``Config.set_main_option`` —
+``migrations/env.py`` now honors an explicitly-set ``sqlalchemy.url`` instead
+of clobbering it from ``get_settings()``. This test therefore NEVER mutates
+the process environment or clears the ``get_settings`` cache, so it cannot
+leak a swapped ``DATABASE_URL`` into the rest of the suite (previously the
+suite's only process-global env mutation — the suspected cross-test leak).
 """
 
 from __future__ import annotations
@@ -13,9 +20,8 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
-from app.config import get_settings
-
 EXPECTED_TABLES = {
+    # (unchanged from before)
     "tasks",
     "plans",
     "plan_steps",
@@ -39,15 +45,10 @@ EXPECTED_TABLES = {
 
 def test_migrations_upgrade_fresh_db() -> None:
     fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
     url = f"sqlite:///{path.replace(os.sep, '/')}"
-    original_url = get_settings().database_url
     try:
-        # Point Alembic at the fresh DB (env.py reads settings at import).
-        os.environ["DATABASE_URL"] = url
-        get_settings.cache_clear()
-
         cfg = Config("alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", url)
         command.upgrade(cfg, "head")
 
         engine = create_engine(url)
@@ -61,6 +62,5 @@ def test_migrations_upgrade_fresh_db() -> None:
         # Alembic runs migrations once: upgrading again is a no-op.
         command.upgrade(cfg, "head")
     finally:
-        os.environ["DATABASE_URL"] = original_url
-        get_settings.cache_clear()
+        os.close(fd)
         os.unlink(path)

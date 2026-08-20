@@ -22,8 +22,11 @@ if config.config_file_name is not None:
 
 logger = logging.getLogger("alembic.env")
 
-# Inject the URL from application settings (env / .env).
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+# Inject the URL from application settings (env / .env) — but only when the
+# caller did NOT already set one (e.g. a test pointing Alembic at a throwaway
+# SQLite DB). An explicitly-set URL is authoritative; never clobber it.
+if config.get_main_option("sqlalchemy.url") is None:
+    config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
 target_metadata = Base.metadata
 

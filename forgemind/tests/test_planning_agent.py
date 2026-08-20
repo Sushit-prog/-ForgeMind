@@ -179,11 +179,14 @@ def test_planner_config_error_without_key_or_mock(monkeypatch) -> None:
     monkeypatch.delenv("FORGEMIND_MOCK_LLM", raising=False)
     from app.config import get_settings
 
+    # Re-read settings from the (monkeypatched) env so the assertion is
+    # against a fresh, provider-less state. No try/finally is needed:
+    # monkeypatch restores the env automatically and clearing the cache only
+    # leaves the next get_settings() to re-read the (already clean) env —
+    # this test no longer leaves a settings-rebuild window open for the rest
+    # of the suite.
     get_settings.cache_clear()
-    try:
-        from app.agents.planner.agent import build_planner
+    from app.agents.planner.agent import build_planner
 
-        with pytest.raises(PlannerConfigError):
-            build_planner()
-    finally:
-        get_settings.cache_clear()
+    with pytest.raises(PlannerConfigError):
+        build_planner()
