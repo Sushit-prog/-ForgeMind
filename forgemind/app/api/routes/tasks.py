@@ -37,6 +37,7 @@ from app.models import (
 )
 from app.runtime.state_machine import TERMINAL_STATES
 from app.runtime.task_lifecycle import USER_CANCELLED, transition_task
+from app.runtime.task_trace import list_execution_events
 from app.schemas import ApprovalRequest, ExecutionEventRead, TaskCreate, TaskRead
 from app.worker.queue import enqueue_advance_task
 
@@ -317,10 +318,5 @@ def list_events(
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return list(
-        db.scalars(
-            select(ExecutionEvent)
-            .where(ExecutionEvent.task_id == task_id)
-            .order_by(ExecutionEvent.created_at, ExecutionEvent.id)
-        )
-    )
+    # Shared with the trace viewer (Phase 11) — one query implementation.
+    return list_execution_events(db, task_id)

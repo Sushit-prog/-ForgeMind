@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.routes.tasks import router as tasks_router
+from app.api.routes.trace import router as trace_router
 from app.config import get_settings
 from app.database.session import check_database_connection
 from app.logging import setup_logging
@@ -32,6 +33,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
     app.include_router(tasks_router)
+    app.include_router(trace_router)
 
     @app.get("/health", tags=["health"])
     def health() -> dict[str, str]:
