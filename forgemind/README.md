@@ -84,6 +84,15 @@ Current milestone scope:
   does PR_CREATION → AWAITING_APPROVAL fire. The human decides via
   `POST /tasks/{id}/approve|reject`: approve → COMPLETED (merging remains yours, on GitHub),
   reject → FAILED deliberately (a human stop, never an auto-replan).
+- **Phase 10.5 — bearer-token auth**: every mutating route (`POST /tasks`, cancel, approve,
+  reject) is gated by a single shared secret (`FORGEMIND_API_TOKEN`, constant-time compare);
+  authenticated actions are audited as `actor="token-holder"`; production fails closed at
+  startup if the token is unset. Read routes and `/health` stay open — the checkpoint you can
+  watch a task through without a token.
+- **Phase 11 — trace viewer**: `GET /tasks/{id}/trace` renders a task's execution history as a
+  human-readable HTML timeline (plan DAG, transitions, tool calls, test runs, review/security
+  verdicts, PR, approval) via a shared read layer that also backs `GET /tasks/{id}/events`.
+  Read-only and deliberately open like the other read routes; approve/reject stay API-only.
 
 ## Quick start
 
@@ -502,6 +511,15 @@ uses `secrets.compare_digest`, and token-authenticated actions are audited as
 `actor="token-holder"` (there are no user accounts — single-operator scope).
 Deliberately out of scope: multi-user accounts, OAuth/GitHub-login approval,
 per-task permissions, token rotation/expiry.
+
+## Trace viewer (Phase 11)
+
+`GET /tasks/{id}/trace` renders the task's execution history as a readable HTML
+timeline — plan DAG, agent transitions, tool calls, test runs, review/security
+verdicts, draft PR, human approval — instead of raw JSON (`app/api/routes/trace.py`
++ `app/templates/`, built on the shared read layer `app/runtime/task_trace.py`,
+which also backs `GET /tasks/{id}/events`). Read-only and deliberately open like
+the other read routes; approve/reject stay API-only.
 
 ## Security posture
 

@@ -1,60 +1,82 @@
 # ForgeMind
 
-Autonomous software-engineering agent: **GitHub issue → investigate → implement → test → review → PR**.
+ForgeMind is an autonomous software-engineering agent that takes a GitHub
+issue and drives it to a reviewable pull request: it plans the work, researches
+the codebase, implements a fix, runs the real test suite, reviews and
+security-checks its own commit, opens a **draft PR on a fork**, and then stops
+for a human to approve or reject it. Every step is persisted as an auditable
+trace you can watch in a browser.
 
-Current milestone scope:
+One-line architecture pitch: same design lineage as the agentops-style
+autonomous coding agents, but with a **capability-gated, deterministic policy
+engine** and a **fail-closed state machine** — the LLM proposes, the pipeline
+enforces. Nothing merges without a human.
 
-- **Phase 1 — foundation layer**: project skeleton, config, database schema, minimal FastAPI Task API.
-- **Phase 2 — task runtime**: an enforced Section-D state machine, an `execution_events` trail,
-  and an arq + Redis worker that drives tasks `CREATED → PLANNING → … → COMPLETED` entirely off
-  the queue.
-- **Phase 3 — tool runtime**: typed tool registry, capability model, deterministic policy engine,
-  and the full tool pipeline (validate → capability → policy → execute → audit) with three
-  harmless example tools.
-- **Phase 4 — git/repository runtime**: real filesystem access. Repository discovery (clone-once
-  cache), per-task git worktrees (never touching `main`), worktree-scoped file read/list/search
-  with airtight path-traversal defense, and `repository.*` / `git.*` tools wired through the
-  pipeline (capability-gated, audited, fixed commit identity). No `git.push`, no `shell.*`.
-- **Phase 5 — LLM provider + Planning Agent**: the first real LLM call and the first agent whose
-  output drives the state machine. `llm/` abstracts providers (OpenRouter now, pluggable later)
-  with strict `structured_output` (never a partially-valid object); the Planning Agent turns a
-  task objective into a schema-validated plan DAG, persists it, and only then does the worker
-  move PLANNING → RESEARCHING. Malformed output retries exactly once; task text is wrapped as
-  DATA (prompt-injection defense); the planner has zero tool capabilities.
-- **Phase 6 — Research Agent**: the first multi-turn tool-use agent. A bounded loop where the
-  LLM proposes `repository.*`/`git.*` tool calls, the Phase-3 pipeline executes them under the
-  researcher's fixed READ-ONLY capability set (`repo.read`, `git.read`, `github.read`), and the
-  loop ends with a schema-validated `ResearchArtifact` whose file claims are cross-checked
-  against what the loop actually observed. RESEARCHING → IMPLEMENTING fires only after the
-  artifact is persisted. Read-only is enforced structurally (a write proposal is DENIED and
-  audited, never "just tried"); file content and git output are DATA, not instructions.
-- **Phase 7 — Developer Agent**: the first write-capable agent. A bounded tool-use loop that
-  writes via `filesystem.write_file` (reusing the Phase-4 traversal defense), commits EXACTLY
-  ONCE via `git.commit`, and ends with a grounded `ImplementationSummary` whose `files_changed`
-  is cross-checked against what was actually written. Zero commits is a HARD failure.
-- **Phase 8 — Test + Debugger Agents**: real pass/fail branching. The Test Agent runs the
-  repository's CONFIGURED test command as a subprocess (allowlist-validated, no agent-input
-  path into the command) — deterministic, no LLM judgment. TESTING branches passed → REVIEWING
-  / failed|error → DEBUGGING; the Debugger investigates read-only, OBSERVES flakiness via one
-  re-run (flaky → REVIEWING, never blocking the pipeline), and classifies the failure with a
-  concrete fix instruction. Fixable replans are bounded by the shared `max_replans` budget
-  (exhausted → ESCALATED); unfixable → FAILED.
-- **Phase 9 — Reviewer + Security Agents**: REVIEWING → SECURITY_REVIEW → VERIFICATION become
-  real. The Reviewer critiques the commit diff + test result ONLY (independence from the
-  Developer's summary is structural); the Security Agent runs a checklist on the same commit,
-  blind to the Reviewer's verdict. Both can genuinely REQUEST_CHANGES/Fail, routing back to
-  IMPLEMENTING via the ONE shared replan path. VERIFICATION is a plain-code staleness check
-  (no LLM): the reviewed commit must still be worktree HEAD with a passing test run.
-- **Phase 10 — GitHub Agent + PR runtime**: the finish move. The verified branch lands as a
-  real DRAFT pull request on a FORK (`git.push` is the ONLY push in the system, target
-  server-side from `fork_url`, fail-closed); `github.create_pr` opens a DRAFT by construction
-  and there is no `github.merge` anywhere — merging stays manual. PR_CREATION →
-  AWAITING_APPROVAL fires only after the `pull_requests` row is persisted; the human decides
-  via `POST /tasks/{id}/approve|reject` (→ COMPLETED / FAILED as a deliberate stop).
-- **Phase 10.5 — bearer-token auth**: the mutating routes (`POST /tasks`, cancel, approve,
-  reject) are gated by a single shared-secret token (`FORGEMIND_API_TOKEN`), compared in
-  constant time, with the authenticated identity audited on every approve/reject/cancel.
-  Read routes and `/health` stay open; production fails closed if the token is unset.
+## The journey
+
+A task walks the pipeline as a sequence of typed agents, each with a fixed,
+structurally-enforced capability set:
+
+1. **Planning** — turns the objective into a schema-validated plan DAG (the only
+   LLM that can't call tools).
+2. **Research** — bounded READ-ONLY tool loop (search/read/list + git status/diff)
+   ending in a grounded research artifact; file claims are cross-checked against
+   what the loop actually observed.
+3. **Developer** — the write step: edits files in an isolated per-task worktree,
+   commits **exactly once**, and its self-reported summary is cross-checked
+   against the files actually written.
+4. **Test** — runs the repository's *configured* test command deterministically
+   (no LLM judgment). Failures shift to the **Debugger**, which investigates
+   read-only, classifies the failure, and — if fixable — re-enters implementation
+   through the one shared replan path (bounded by `max_replans`).
+5. **Reviewer + Security** — both critique the **same commit** (diff + test
+   result only) under read-only capabilities, each blind to the other's verdict.
+6. **Verification** — a plain-code staleness check: the reviewed commit must still
+   be worktree HEAD with a passing test run.
+7. **GitHub** — the verified branch lands as a real **draft PR on a fork**
+   (`git.push` is the only push in the system, and there is no merge primitive).
+8. **Human checkpoint** — the task parks in `AWAITING_APPROVAL`; you review the
+   draft PR and `approve` (→ COMPLETED) or `reject` (→ FAILED). Merging stays
+   manual on GitHub.
+
+## Architecture
+
+The pipeline is one task state machine enforced in code, never by asking the
+LLM "are we done?":
+
+```
+CREATED → PLANNING → RESEARCHING → IMPLEMENTING → TESTING → REVIEWING
+        → SECURITY_REVIEW → VERIFICATION → PR_CREATION → AWAITING_APPROVAL → COMPLETED
+
+TESTING → DEBUGGING → IMPLEMENTING           tests failed; fixable, replan (bounded)
+REVIEWING / SECURITY_REVIEW → IMPLEMENTING   changes requested / security fail
+VERIFICATION → TESTING                       reviewed commit went stale
+AWAITING_APPROVAL → COMPLETED | FAILED       human decision
+FAILED → RECOVERING → REPLANNING             recoverable failures re-enter the pipeline
+any state → FAILED | ESCALATED               unrecoverable / replan budget exhausted
+COMPLETED / ESCALATED = terminal
+```
+
+What makes it hold together:
+
+- **Capability gates.** Every agent lists the capabilities it may use
+  (`repo.read`, `repo.write`, `git.read`, ...). The tool pipeline checks the
+  agent's set at call time — a read-only agent *cannot* write, by construction.
+- **A deterministic policy engine.** Pure functions over typed input, no LLM:
+  any rule's DENY wins over any ALLOW. Unknown tools and malformed input raise
+  loudly — never a silent no-op.
+- **Strictly-structured LLM output.** Agents emit schema-validated objects; the
+  provider either returns a fully-valid parse or raises — malformed output
+  retries with a correction prompt, then fails the task. Objectives and repo
+  content are treated as **data, not instructions** (prompt-injection tests
+  prove injected "instructions" can never persist).
+- **Isolation by design.** Each task gets its own git worktree off a
+  clone-once cache; file access is worktree-scoped with airtight path-traversal
+  defense; `shell.run_test` runs the allowlist-validated test command as an
+  argument list, never `shell=True`.
+- **A complete audit trail.** Every transition, tool call, test run, review and
+  security verdict, PR, and human decision is persisted — and now viewable as a
+  rendered trace.
 
 ## Quick start
 
@@ -83,7 +105,7 @@ uvicorn app.main:app --reload
 Then (mutating calls need the bearer token — dev fallback shown inline):
 
 ```bash
-# A single shared-secret token gates the mutating routes (Phase 10.5).
+# A single shared-secret token gates the mutating routes.
 AUTH="Authorization: Bearer ${FORGEMIND_API_TOKEN:-forgemind-dev-token}"
 
 curl -X POST localhost:8000/tasks \
@@ -95,204 +117,121 @@ curl -X POST localhost:8000/tasks \
 curl localhost:8000/tasks                # list        (open — no token needed)
 curl localhost:8000/tasks/{id}           # fetch one — watch status walk to AWAITING_APPROVAL
 curl localhost:8000/tasks/{id}/events    # ordered execution-event trail
+curl localhost:8000/tasks/{id}/trace     # the human-readable trace viewer
 curl -X POST localhost:8000/tasks/{id}/cancel -H "$AUTH"   # -> FAILED (user_cancelled); 409 on terminal tasks
 curl -X POST localhost:8000/tasks/{id}/approve -H "$AUTH"  # human checks out the draft PR, then approves -> COMPLETED
 curl -X POST localhost:8000/tasks/{id}/reject -H "$AUTH"   # human rejects -> FAILED (deliberate stop)
 curl localhost:8000/health               # {"status": "ok"}   (open)
 ```
 
-## Tests
-
-```bash
-pytest              # hermetic suite (SQLite, no services) — state machine, lifecycle, API,
-                    # policy engine, path traversal, git runtime, planner, research agent
-pytest tests_e2e/   # end-to-end (needs Postgres + Redis up) — real worker pipeline, cancel,
-                    # crash recovery (kill/restart), two-worker concurrency, research loop
-```
-
-Note: `tests_e2e/` spawns its OWN worker subprocesses on the same Postgres/Redis, so stop the
-compose worker first (`docker compose stop worker`) — an extra always-on worker races the test
-workers (both sweep the same tasks). This is a test-harness constraint, not a product issue.
-
-## Layout
-
-```
-app/
-  agents/
-    base.py                 Agent ABC + shared structured_output_with_retries
-    planner/                PlanningAgent: prompt (data-not-instructions), Plan schema +
-                            DAG validation, retry-once, persistence
-    researcher/             ResearchAgent: bounded tool-use loop (read-only), ResearchArtifact
-                            schema + grounding cross-check, forced synthesis on budget exhaustion
-  api/routes/tasks.py       Task API: create/list/get/cancel/events
-  capabilities/             Capability value objects + per-agent assignment (Section H)
-  database/                 engine/session + Alembic migrations
-  execution/tool_pipeline.py  validate -> capability -> policy -> execute -> audit
-  git/
-    runner.py               git subprocess runner (arg lists only, fixed identity, no prompts)
-    operations.py           status/diff/log/create_branch/commit on a worktree
-    worktree_manager.py     per-task worktrees (create/discard/path_for) — the only branch creator
-  llm/
-    provider.py             LLMProvider ABC + parse/validate (strict structured_output)
-    openrouter.py           OpenAI-compatible provider (httpx, timeouts -> LLMTimeoutError)
-    mock.py                 deterministic stub provider (tests / key-less dev)
-    config.py               role -> model from env (LLM_MODEL_PLANNER, ...)
-  models/                   SQLAlchemy models (Section-G schema) + ExecutionEvent + ToolCall
-  policies/                 deterministic PolicyEngine + risk-default & explicit-deny rules
-  repository/
-    discovery.py            clone-once cache + default-branch/base-commit resolution
-    file_access.py          worktree-scoped read/list/search — traversal-safe
-  runtime/
-    state_machine.py        Section-D legal-transition table — pure logic, no I/O
-    task_lifecycle.py       transitions + events + stub driver + agent transitions
-                            (advance_task_with_agents) with compare-and-swap re-check
-  schemas/                  Pydantic request/response schemas
-  tools/                    Tool ABC + registry + example tools + repository.* / git.* tools
-  worker/
-    queue.py                arq Redis settings + pool + enqueue helper
-    jobs/advance_task.py    one job = one transition (PLANNING/ RESEARCHING run the real agents)
-    worker.py               arq entrypoint + startup sweep (crash recovery)
-  config.py                 env-driven settings (secrets never hardcoded/logged)
-  logging.py                logging setup with URL redaction
-  main.py                   FastAPI app + /health + fail-fast DB check
-tests/                      hermetic suite (SQLite + real local git repos + stubbed LLM)
-tests_e2e/                  end-to-end suite (Postgres + Redis + worker subprocesses)
-```
-
-## Tool pipeline (architecture doc sections F/H)
-
-Every tool invocation goes through `app/execution/tool_pipeline.py`:
-
-```
-validate input -> capability check -> policy check -> execute -> audit
-```
-
-- **Exactly one `tool_calls` row per invocation**, whatever the outcome
-  (DENIED / EXECUTED / FAILED; ALLOWED is the transient admit state).
-- **Fail-closed policy engine**: pure functions over typed input, no LLM;
-  any rule's DENY wins over any ALLOW vote.
-- **Secrets redacted** from stored input/output (`redact_sensitive`) — the
-  structured-data analogue of the Phase-1 URL redaction.
-- Contract errors (unknown tool, malformed input) raise loudly and never
-  execute or write a row.
-
-Example tools prove the paths: `example.echo` (executes), `example.read_file`
-(denied without `repo.read`), `example.denied` (denied by explicit policy).
-
-## LLM provider + Planning Agent (Phase 5)
-
-- **`llm/` provider abstraction**: `structured_output` either returns a fully-valid object or
-  raises `LLMMalformedOutputError` with the raw output attached — malformed JSON and
-  valid-JSON-with-wrong-shape are both rejected. Models are per-role env vars
-  (`LLM_MODEL_PLANNER`), never hardcoded. `FORGEMIND_MOCK_LLM=1` runs a deterministic stub
-  provider (tests / key-less dev); a configured `OPENROUTER_API_KEY` always wins.
-- **Planning Agent**: task objective in → schema-validated plan DAG out → persisted to
-  `plans`/`plan_steps` (raw output in `plans.raw_llm_output`) → PLANNING → RESEARCHING fires
-  only after that. DAG rules: unique ids, no dangling deps, no cycles, every implement step
-  has a research ancestor.
-- **Retry boundary**: transient errors (timeout, 429/5xx) retry with bounded backoff; the
-  malformed/invalid retry happens exactly ONCE with a correction prompt; a second failure
-  raises and the task goes FAILED (never ESCALATED), raw output preserved.
-- **Prompt injection**: task objective/repo metadata sit in a `<reference_data>` block and the
-  system prompt declares them DATA, not instructions. Tests feed injection-style objectives
-  and prove the injected payload can never become a persisted plan.
-- **Planner capabilities are structurally empty** — it cannot invoke any tool.
-
-## Research Agent (Phase 6)
-
-- **Bounded tool-use loop**: the LLM proposes ONE tool call per turn (`repository.search`,
-  `read_file`, `list_files`, `git.status`/`diff`/`log`); the pipeline executes it under the
-  researcher's fixed read-only capability set; results are fed back as `<observation>` DATA;
-  repeat up to `MAX_RESEARCH_TOOL_CALLS` (default 10). A `{"final": true}` response ends the
-  loop and the runtime asks for the `ResearchArtifact`.
-- **Read-only is structural**: the capability set is `repo.read`/`git.read`/`github.read` — a
-  write proposal (e.g. `git.commit`) is DENIED by the pipeline and audited, and the loop
-  survives (the denial becomes an observation).
-- **Grounding cross-check**: the artifact's `relevant_files`/`relevant_tests` must have been
-  observed during the loop (read/searched/listed). Fabricated claims are rejected once with a
-  correction prompt; if the retry still lies, the artifact is accepted WITH a loud
-  `artifact.files_unverified` audit entry (a wrong file in a hypothesis is recoverable
-  downstream; failing the whole task over it is not).
-- **Budget exhaustion**: an LLM that never says `final` is hard-stopped at the budget, audited
-  (`research.budget_exhausted`), and forced into synthesis — never an infinite loop.
-- **Prompt injection**: file contents and git output are untrusted DATA like the issue text;
-  an injection inside a file cannot fabricate grounding (the cross-check rejects it).
-- **Concurrency-safe worktree/clone**: two workers racing the same task (research commits
-  mid-transaction, releasing the row lock) are handled by compare-and-swap transitions and
-  idempotent clone/worktree creation — one transition per state, no spurious failures.
-
-## Git/repository runtime (Phase 4)
-
-- **One clone per repo**, cached at `repositories.local_clone_path` (`--no-checkout`, so no
-  default-branch working tree exists on disk at all). Per-task worktrees via
-  `git worktree add -b agent/task-{id}` from the default-branch HEAD — the only place a branch
-  is created; nothing ever commits to or checks out `main`.
-- **Server-side path resolution**: every file/git tool takes a `worktree_id`; paths resolve
-  against the worktree root and anything escaping it (`../`, absolute, symlink escape) raises
-  `PathTraversalError` (a `SecurityError`) before any read. Traversal is logged as a
-  security-relevant event and surfaces as a FAILED tool call.
-- **Commits** stage all changes (`git add -A`) and refuse empty trees, with a fixed identity
-  (`ForgeMind Agent <agent@forgemind.local>`) — agent input can never set authorship.
-- **Discard** (`git worktree remove --force` + branch delete) enables Section J's
-  "discard and recreate from base_commit" recovery path — recreated worktrees start byte-
-  identical to the original.
-- `git.*`/`repository.*` tools are capability-gated (`repo.read`, `git.read`, `git.write`),
-  risk-tiered, and fully audited by the Phase 3 pipeline.
-
-## State machine (architecture doc section D)
-
-Transitions are enforced by a deterministic lookup table (`runtime/state_machine.py`),
-never by asking the LLM "are we done?" Illegal transitions raise `IllegalTransitionError`
-and are logged — `tasks.status` is never silently updated. Every applied transition writes an
-`execution_events` row in the same transaction, so a crash mid-run always leaves the task at
-its last persisted status; the worker's startup sweep re-enqueues it from there.
-
-## Schema
-
-Tables (architecture doc section G, milestone scope): `tasks`, `plans` (incl.
-`raw_llm_output`), `plan_steps`, `task_steps`, `capabilities`, `policies`, `audit_logs`,
-`repositories` (incl. `local_clone_path`), `worktrees`, `execution_events`, `tool_calls`,
-`research_artifacts`. Remaining Section-G tables arrive with the phases that use them
-(agents/eval). Tasks default to a bounded replan budget (`max_replans=3`) — Section D's
-"budget exhausted → ESCALATED" is enforced even when the API client sets no budget.
-
 ## Authentication
 
-The mutating API routes (`POST /tasks`, `POST /tasks/{id}/cancel`,
-`POST /tasks/{id}/approve`, `POST /tasks/{id}/reject`) are gated by a **single
-shared-secret bearer token** (Phase 10.5). Read routes (`GET /tasks`,
-`GET /tasks/{id}`, `GET /tasks/{id}/events`) and `/health` stay open so a human
-can watch a task walk the pipeline without the token.
+The mutating API routes (`POST /tasks`, cancel, approve, reject) are gated by a
+**single shared-secret bearer token** (`FORGEMIND_API_TOKEN`, sent as
+`Authorization: Bearer <token>`), compared in constant time
+(`secrets.compare_digest`), with the authenticated identity (`token-holder`)
+recorded on the audit trail for every approve/reject/cancel. Read routes
+(`GET /tasks`, `GET /tasks/{id}`, `GET /tasks/{id}/events`,
+`GET /tasks/{id}/trace`) and `/health` stay open so a human can watch a task
+without the token. Unset in development/test the token falls back to
+`forgemind-dev-token`; **production fails closed** — without a
+`FORGEMIND_API_TOKEN`, the API refuses to start.
 
-- **Env var**: `FORGEMIND_API_TOKEN`. Send it as
-  `Authorization: Bearer <token>` on every mutating call.
-- **Dev/test default**: unset, `FORGEMIND_API_TOKEN` falls back to
-  `forgemind-dev-token` so key-less local development and the hermetic suite
-  work out of the box.
-- **Production fails closed**: with `ENVIRONMENT=production` and no
-  `FORGEMIND_API_TOKEN`, the API **refuses to start** rather than silently
-  serving unauthenticated mutating routes.
-- **Audit trail**: token-authenticated actions are recorded with actor
-  `token-holder` (`task.approve`, `task.reject`, `task.cancelled`) — the one
-  place that authorizes real-world side effects (a PR-approval decision) has no
-  author gap.
-- **Constant-time compare**: the token is checked with
-  `secrets.compare_digest`, never a plain `==`.
+## Trace viewer
 
-Scope is deliberately **single-operator, single shared secret** — matching the
-project's current milestone. Out of scope (future work, not built): multi-user
-accounts, OAuth / GitHub-login approval, per-task granular permissions, and
-token rotation/expiry.
+`GET /tasks/{id}/trace` renders a task's full execution history as a
+human-readable HTML timeline: the plan DAG, every agent transition, each tool
+call, test runs, review and security verdicts, the draft PR, and the human
+approval decision. Away from raw JSON, you get the task header and status, a
+prominent PR link at the approval checkpoint, a failure-reason banner on
+FAILED/ESCALATED tasks, and an auto-refresh that stops once the task is
+terminal. It is read-only — editing or approving stays API-only on the
+authenticated routes — so, like the other read routes, it is intentionally
+open.
+
+## Testing
+
+```bash
+pytest                   # hermetic suite (SQLite, real local git repos, stubbed LLM)
+                         # — no services required
+pytest tests_e2e/        # end-to-end (needs Postgres + Redis up) — real worker
+                         # pipeline, crash recovery, concurrency, GitHub PR flow
+```
+
+Note: `tests_e2e/` spawns its OWN worker subprocesses, so stop the compose
+worker first (`docker compose stop worker`) — an extra always-on worker races
+the test workers (both sweep the same tasks). This is a test-harness
+constraint, not a product issue.
+
+`python scripts/reproduce_flake.py` exists as a diagnostic tool: it repeats the
+hermetic suite (or a forced-order mock-LLM file list) until the historic
+order-dependent flake reproduces, so any recurrence is caught with a traceback
+instead of chased blindly.
+
+## Milestone status
+
+Feature-complete through the single-operator milestone — every phase below is
+implemented, tested, and wired into the running pipeline:
+
+- **Phase 1–4** — foundation, enforced state machine + arq worker, tool
+  registry/policy engine, git runtime (clone-once cache, per-task worktrees,
+  traversal-safe file access).
+- **Phase 5–6** — LLM provider abstraction + Planning Agent; bounded read-only
+  Research Agent with grounding cross-check.
+- **Phase 7** — Developer Agent: write-capable loop, exactly-one-commit,
+  cross-checked summary.
+- **Phase 8** — Test + Debugger Agents: deterministic pass/fail branching and
+  flakiness-aware debugging with bounded replans.
+- **Phase 9** — Reviewer + Security Agents: independent, blind verdicts plus a
+  code-level staleness check.
+- **Phase 10** — GitHub Agent + PR runtime: fork draft PR with a human approval
+  gate; no merge primitive anywhere.
+- **Phase 10.5** — bearer-token auth on all mutating routes.
+- **Phase 11** — the read-only trace viewer.
 
 ## Security posture
 
 - Secrets come from `.env` only; connection strings are logged redacted.
 - Startup fails fast if the DB is unreachable — no silent hangs.
 - The worker uses the same env-driven config as the API — no new secret surface.
-- Shell execution is confined to ONE tool (`shell.run_test`) running the repository's
-  allowlist-validated test command as an argument list (never `shell=True`) with a hard
-  timeout — no agent-input path into the command; file writes stay inside the task's
-  worktree (traversal-rejected).
-- External network (Phase 10) is confined to the GitHub REST API and a push to the operator's
-  FORK — `repositories.url` is for reads only, the push/PR target must come from `fork_url`
-  (fail-closed), and `GITHUB_TOKEN` is embedded per-invocation and redacted from logs.
+- Shell execution is confined to ONE tool (`shell.run_test`) running the
+  repository's allowlist-validated test command as an argument list (never
+  `shell=True`) with a hard timeout — no agent-input path into the command; file
+  writes stay inside the task's worktree (traversal-rejected).
+- External network is confined to the GitHub REST API and a push to the
+  operator's FORK — `repositories.url` is for reads only, the push/PR target
+  must come from `fork_url` (fail-closed), and `GITHUB_TOKEN` is embedded
+  per-invocation and redacted from logs.
+
+## Project layout
+
+```
+app/
+  agents/            planner · researcher · developer · tester · debugger ·
+                     reviewer · security · github — typed loops, fixed capability sets
+  api/routes/        tasks (JSON API) · trace (HTML viewer)
+  capabilities/      capability value objects + per-agent assignment
+  execution/         the tool pipeline: validate → capability → policy → execute → audit
+  git/               subprocess runner (arg lists, fixed identity) + per-task worktrees
+  llm/               provider abstraction (OpenRouter / deterministic stub) + parse/validate
+  models/            Section-G SQLAlchemy schema
+  policies/          deterministic policy engine (fail-closed)
+  repository/        clone-once cache + traversal-safe read/list/search
+  runtime/           state machine (pure logic) · task lifecycle · trace assembly
+  schemas/           Pydantic request/response schemas
+  templates/         trace viewer templates (Jinja2, vanilla CSS)
+  worker/            arq entrypoint · advance_task job · startup sweep (crash recovery)
+tests/               hermetic suite (SQLite + git + stubbed LLM)
+tests_e2e/           end-to-end suite (Postgres + Redis + worker subprocesses)
+```
+
+## Out of scope / future work
+
+Deliberate, documented scope for today's single-operator milestone — the
+things a multi-user build would add first:
+
+- **Multi-user accounts** and per-task granular permissions (today "who" is the
+  bearer-token holder).
+- **OAuth / GitHub-login approval** and token rotation/expiry.
+- **Merge automation** — ForgeMind opens the draft PR and waits; merging is
+  intentionally a manual GitHub action.
