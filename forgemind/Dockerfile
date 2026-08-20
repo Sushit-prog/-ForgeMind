@@ -4,7 +4,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install the package + pinned deps first so rebuilds reuse the layer.
-COPY pyproject.toml README.md alembic.ini ./
+COPY pyproject.toml alembic.ini ./
 COPY app ./app
 COPY tests ./tests
 
