@@ -28,6 +28,33 @@ Current milestone scope:
   against what the loop actually observed. RESEARCHING → IMPLEMENTING fires only after the
   artifact is persisted. Read-only is enforced structurally (a write proposal is DENIED and
   audited, never "just tried"); file content and git output are DATA, not instructions.
+- **Phase 7 — Developer Agent**: the first write-capable agent. A bounded tool-use loop that
+  writes via `filesystem.write_file` (reusing the Phase-4 traversal defense), commits EXACTLY
+  ONCE via `git.commit`, and ends with a grounded `ImplementationSummary` whose `files_changed`
+  is cross-checked against what was actually written. Zero commits is a HARD failure.
+- **Phase 8 — Test + Debugger Agents**: real pass/fail branching. The Test Agent runs the
+  repository's CONFIGURED test command as a subprocess (allowlist-validated, no agent-input
+  path into the command) — deterministic, no LLM judgment. TESTING branches passed → REVIEWING
+  / failed|error → DEBUGGING; the Debugger investigates read-only, OBSERVES flakiness via one
+  re-run (flaky → REVIEWING, never blocking the pipeline), and classifies the failure with a
+  concrete fix instruction. Fixable replans are bounded by the shared `max_replans` budget
+  (exhausted → ESCALATED); unfixable → FAILED.
+- **Phase 9 — Reviewer + Security Agents**: REVIEWING → SECURITY_REVIEW → VERIFICATION become
+  real. The Reviewer critiques the commit diff + test result ONLY (independence from the
+  Developer's summary is structural); the Security Agent runs a checklist on the same commit,
+  blind to the Reviewer's verdict. Both can genuinely REQUEST_CHANGES/Fail, routing back to
+  IMPLEMENTING via the ONE shared replan path. VERIFICATION is a plain-code staleness check
+  (no LLM): the reviewed commit must still be worktree HEAD with a passing test run.
+- **Phase 10 — GitHub Agent + PR runtime**: the finish move. The verified branch lands as a
+  real DRAFT pull request on a FORK (`git.push` is the ONLY push in the system, target
+  server-side from `fork_url`, fail-closed); `github.create_pr` opens a DRAFT by construction
+  and there is no `github.merge` anywhere — merging stays manual. PR_CREATION →
+  AWAITING_APPROVAL fires only after the `pull_requests` row is persisted; the human decides
+  via `POST /tasks/{id}/approve|reject` (→ COMPLETED / FAILED as a deliberate stop).
+- **Phase 10.5 — bearer-token auth**: the mutating routes (`POST /tasks`, cancel, approve,
+  reject) are gated by a single shared-secret token (`FORGEMIND_API_TOKEN`), compared in
+  constant time, with the authenticated identity audited on every approve/reject/cancel.
+  Read routes and `/health` stay open; production fails closed if the token is unset.
 
 ## Quick start
 
@@ -262,4 +289,10 @@ token rotation/expiry.
 - Secrets come from `.env` only; connection strings are logged redacted.
 - Startup fails fast if the DB is unreachable — no silent hangs.
 - The worker uses the same env-driven config as the API — no new secret surface.
-- No shell execution, no file writes outside the repo, no external network calls yet.
+- Shell execution is confined to ONE tool (`shell.run_test`) running the repository's
+  allowlist-validated test command as an argument list (never `shell=True`) with a hard
+  timeout — no agent-input path into the command; file writes stay inside the task's
+  worktree (traversal-rejected).
+- External network (Phase 10) is confined to the GitHub REST API and a push to the operator's
+  FORK — `repositories.url` is for reads only, the push/PR target must come from `fork_url`
+  (fail-closed), and `GITHUB_TOKEN` is embedded per-invocation and redacted from logs.
