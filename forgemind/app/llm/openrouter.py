@@ -7,11 +7,15 @@ be swapped in without code changes.
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 from pydantic import BaseModel
 
 from app.llm.errors import LLMProviderError, LLMTimeoutError
 from app.llm.provider import LLMProvider, Message, parse_and_validate
+
+logger = logging.getLogger(__name__)
 
 # HTTP statuses treated as transient (retried by the caller with backoff).
 TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
@@ -76,20 +80,40 @@ class OpenRouterProvider(LLMProvider):
                     json=body,
                 )
         except httpx.TimeoutException as exc:
-            raise LLMTimeoutError(f"provider timed out after {self.timeout_seconds}s") from exc
+            raise LLMTimeoutError(
+                f"provider timed out after {self.timeout_seconds}s"
+            ) from exc
         except httpx.HTTPError as exc:
             raise LLMProviderError(0, f"transport error: {exc}") from exc
 
         if resp.status_code != 200:
             raise LLMProviderError(resp.status_code, resp.text)
         try:
-            return resp.json()["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, ValueError) as exc:
-            raise LLMProviderError(resp.status_code, f"unexpected response shape: {exc}") from exc
+            payload = resp.json()
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise LLMProviderError(
+                resp.status_code, f"unexpected response shape: {exc}"
+            ) from exc
+        if content is None:
+            # Reasoning models on free tiers occasionally answer HTTP 200
+            # with content=null. Downstream .strip() would crash the agent
+            # on a bare AttributeError; classified as 503 instead so the
+            # bounded retry + fallback hop treat it as availability.
+            finish_reason = payload["choices"][0].get("finish_reason")
+            logger.warning(
+                "llm provider returned null content "
+                "(finish_reason=%s usage=%s top_level_keys=%s)",
+                finish_reason,
+                payload.get("usage"),
+                sorted(payload.keys()),
+            )
+            raise LLMProviderError(
+                503, f"provider returned null content (finish_reason={finish_reason})"
+            )
+        return content
 
-    async def generate(
-        self, messages: list[Message], **kwargs: object
-    ) -> str:
+    async def generate(self, messages: list[Message], **kwargs: object) -> str:
         return await self._chat(
             messages,
             model=kwargs.get("model"),  # type: ignore[arg-type]

@@ -8,6 +8,7 @@ rejected (never a lenient parse), and code-fenced JSON is tolerated.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -108,3 +109,85 @@ def test_is_transient_error_classification() -> None:
     assert not is_transient_error(LLMProviderError(401, "bad key"))
     assert not is_transient_error(LLMProviderError(400, "bad request"))
     assert not is_transient_error(ValueError("unrelated"))
+
+
+# --- null-content guard (run #3 incident: reasoning models answering
+# --- HTTP 200 with content=null crashed parse_and_validate on .strip()) ------
+
+import logging
+
+import app.llm.openrouter as openrouter_module
+from app.llm.openrouter import OpenRouterProvider
+from app.llm.provider import Message
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+        self.text = ""
+
+    def json(self):
+        return self._payload
+
+
+class _FakeAsyncClient:
+    def __init__(self, response, **_kwargs):
+        self._response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, *a, **k):
+        return self._response
+
+
+def _patch_http(monkeypatch, payload) -> None:
+    monkeypatch.setattr(
+        openrouter_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: _FakeAsyncClient(_FakeResponse(payload)),
+    )
+
+
+def _provider() -> OpenRouterProvider:
+    return OpenRouterProvider(api_key="k", model="test-model")
+
+
+def test_null_content_raises_transient_503_with_diagnostics(
+    monkeypatch, caplog
+) -> None:
+    payload = {
+        "id": "resp-1",
+        "model": "cohere/north-mini-code:free",
+        "choices": [
+            {"message": {"role": "assistant", "content": None}, "finish_reason": "length"}
+        ],
+        "usage": {"completion_tokens": 410},
+    }
+    _patch_http(monkeypatch, payload)
+
+    with caplog.at_level(logging.WARNING, logger="app.llm.openrouter"):
+        with pytest.raises(LLMProviderError) as exc_info:
+            asyncio.run(_provider().generate([Message(role="user", content="hi")]))
+
+    assert exc_info.value.status_code == 503
+    assert is_transient_error(exc_info.value), "null content must engage retry+fallback"
+    assert "finish_reason=length" in str(exc_info.value)
+    warning = [r for r in caplog.records if "null content" in r.getMessage()]
+    assert warning, "diagnostic warning must be logged"
+    text = warning[0].getMessage()
+    assert "length" in text and "completion_tokens" in text and "'id'" in text
+
+
+def test_missing_message_is_unexpected_shape_not_crash(monkeypatch) -> None:
+    payload = {"choices": [{"message": None}]}
+    _patch_http(monkeypatch, payload)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        asyncio.run(_provider().generate([Message(role="user", content="hi")]))
+
+    assert "unexpected response shape" in str(exc_info.value)
