@@ -191,3 +191,41 @@ def test_missing_message_is_unexpected_shape_not_crash(monkeypatch) -> None:
         asyncio.run(_provider().generate([Message(role="user", content="hi")]))
 
     assert "unexpected response shape" in str(exc_info.value)
+
+
+def test_no_choices_error_envelope_raises_transient_503(
+    monkeypatch, caplog
+) -> None:
+    """Run #6 finding: after all upstream providers fail, OpenRouter answers
+    HTTP 200 with an error envelope and NO choices key — which used to wrap
+    as non-transient 'unexpected response shape' and blocked hops deeper in
+    the chain. Must classify as transient 503 instead."""
+    payload = {
+        "error": {"message": "All providers failed to generate", "code": 502},
+        "provider": "NVIDIA",
+    }
+    _patch_http(monkeypatch, payload)
+
+    with caplog.at_level(logging.WARNING, logger="app.llm.openrouter"):
+        with pytest.raises(LLMProviderError) as exc_info:
+            asyncio.run(_provider().generate([Message(role="user", content="hi")]))
+
+    assert exc_info.value.status_code == 503
+    assert is_transient_error(exc_info.value)
+    assert "All providers failed" in str(exc_info.value)
+    warning = [r for r in caplog.records if "no choices" in r.getMessage()]
+    assert warning, "diagnostic warning must be logged"
+    text = warning[0].getMessage()
+    assert "All providers failed" in text
+    assert "'error'" in text and "'provider'" in text
+
+
+def test_missing_choices_without_error_key_also_transient(monkeypatch) -> None:
+    payload = {"id": "resp-9", "object": "chat.completion"}  # malformed, no error
+    _patch_http(monkeypatch, payload)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        asyncio.run(_provider().generate([Message(role="user", content="hi")]))
+
+    assert exc_info.value.status_code == 503
+    assert is_transient_error(exc_info.value)

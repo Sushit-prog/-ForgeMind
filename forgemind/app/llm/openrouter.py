@@ -90,6 +90,34 @@ class OpenRouterProvider(LLMProvider):
             raise LLMProviderError(resp.status_code, resp.text)
         try:
             payload = resp.json()
+        except ValueError as exc:
+            raise LLMProviderError(
+                resp.status_code, f"unexpected response shape: {exc}"
+            ) from exc
+        if not isinstance(payload, dict) or not payload.get("choices"):
+            # OpenRouter occasionally answers HTTP 200 with NO choices at all
+            # — typically {"error": {...}} after every upstream provider for
+            # the model failed. That is availability, not correctness: 503 so
+            # the bounded retry + fallback hop engage instead of crashing the
+            # agent or silently blocking hops deeper in the chain.
+            err = payload.get("error") if isinstance(payload, dict) else None
+            err_summary = (
+                {k: err.get(k) for k in ("message", "code", "metadata") if k in err}
+                if isinstance(err, dict)
+                else err
+            )
+            logger.warning(
+                "llm provider returned no choices (error=%s top_level_keys=%s)",
+                err_summary,
+                sorted(payload.keys())
+                if isinstance(payload, dict)
+                else type(payload).__name__,
+            )
+            message = err.get("message") if isinstance(err, dict) else err
+            raise LLMProviderError(
+                503, f"provider returned no choices (error={message})"
+            )
+        try:
             content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise LLMProviderError(
