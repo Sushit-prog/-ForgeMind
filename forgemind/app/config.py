@@ -213,6 +213,20 @@ class Settings(BaseSettings):
             "truncation notice (env: LIST_FILES_MAX_ENTRIES)."
         ),
     )
+    # arq's outer job ceiling. Attempt #5 orphaned a RESEARCHING task at the
+    # previous hardcoded 300s default: with bounded retries + fallback hops
+    # engaged on a flaky free tier, a research round-trip can legitimately
+    # exceed 300s. The worker additionally enforces its own INNER deadline
+    # slightly below this value so a hang converts into an explicit
+    # FAILED(job_timeout) — routed through recovery — instead of an orphan.
+    worker_job_timeout_seconds: int = Field(
+        default=900,
+        ge=60,
+        description=(
+            "arq job_timeout ceiling for advance_task jobs "
+            "(env: WORKER_JOB_TIMEOUT_SECONDS)."
+        ),
+    )
     # GitHub integration (Phase 10). GITHUB_TOKEN is the ONLY credential and
     # a SECRET — loaded from env only, never hardcoded, never logged. The
     # base URL is configurable for GitHub Enterprise / self-hosted gateways.

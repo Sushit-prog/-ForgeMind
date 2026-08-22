@@ -23,18 +23,47 @@ construction costs nothing and is the honest model.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 import uuid
 
+from app.config import get_settings
 from app.database.session import SessionLocal
-from app.models import TaskStatus
+from app.models import Task, TaskStatus
 from app.runtime.state_machine import TERMINAL_STATES, IllegalTransitionError
-from app.runtime.task_lifecycle import advance_task_with_agents
+from app.runtime.task_lifecycle import advance_task_with_agents, transition_task
 from app.worker.queue import JOB_ADVANCE_TASK
 
 logger = logging.getLogger(__name__)
+
+# The worker enforces its OWN inner deadline slightly below arq's outer
+# job_timeout ceiling (settings.worker_job_timeout_seconds): a hung round-trip
+# then converts into an explicit FAILED(job_timeout) — routed through the
+# standard FAILED -> RECOVERING -> REPLANNING recovery — instead of arq
+# killing the job outright and silently orphaning the row (run #1 and
+# attempt #5 both failed this way before this existed).
+JOB_TIMEOUT_REASON = "job_timeout"
+_JOB_TIMEOUT_MARGIN_SECONDS = 30
+MIN_INNER_BUDGET_SECONDS = 60
+
+
+def _mark_job_timeout_failure(db, task_id: uuid.UUID) -> TaskStatus | None:
+    """CAS the stuck task to FAILED(job_timeout); None when not applicable.
+
+    Skips terminal rows and rows already FAILED — a user_cancelled row is
+    intentionally terminal and must never be resurrected by this path.
+    """
+    locked = db.get(Task, task_id)
+    if locked is None:
+        return None
+    current = TaskStatus(locked.status)
+    if current in TERMINAL_STATES or current is TaskStatus.FAILED:
+        return None
+    transition_task(db, locked, TaskStatus.FAILED, reason=JOB_TIMEOUT_REASON)
+    db.commit()
+    return TaskStatus.FAILED
 
 
 def _build_agent(build_fn, label: str):
@@ -56,6 +85,7 @@ async def advance_task(ctx: dict, task_id: str) -> None:
 
     task_uuid = uuid.UUID(task_id)
     db = SessionLocal()
+    new_status: TaskStatus | None = None
     try:
         from app.agents.debugger.agent import build_debugger
         from app.agents.developer.agent import build_developer
@@ -70,17 +100,30 @@ async def advance_task(ctx: dict, task_id: str) -> None:
         # over for each task (see module docstring). The tester is
         # deterministic (no LLM provider at all) and every other agent's
         # provider is per-job like the rest.
-        new_status = await advance_task_with_agents(
-            db,
-            task_uuid,
-            _build_agent(build_planner, "Planner"),
-            _build_agent(build_researcher, "Researcher"),
-            _build_agent(build_developer, "Developer"),
-            _build_agent(build_tester, "Tester"),
-            _build_agent(build_debugger, "Debugger"),
-            _build_agent(build_reviewer, "Reviewer"),
-            _build_agent(build_security, "Security"),
-            _build_agent(build_github, "GitHub"),
+        inner_budget = max(
+            get_settings().worker_job_timeout_seconds - _JOB_TIMEOUT_MARGIN_SECONDS,
+            MIN_INNER_BUDGET_SECONDS,
+        )
+        async with asyncio.timeout(inner_budget):
+            new_status = await advance_task_with_agents(
+                db,
+                task_uuid,
+                _build_agent(build_planner, "Planner"),
+                _build_agent(build_researcher, "Researcher"),
+                _build_agent(build_developer, "Developer"),
+                _build_agent(build_tester, "Tester"),
+                _build_agent(build_debugger, "Debugger"),
+                _build_agent(build_reviewer, "Reviewer"),
+                _build_agent(build_security, "Security"),
+                _build_agent(build_github, "GitHub"),
+            )
+    except TimeoutError:
+        # OUR inner deadline fired before arq's outer ceiling.
+        db.rollback()
+        new_status = _mark_job_timeout_failure(db, task_uuid)
+        logger.warning(
+            "task %s exceeded %ss inner budget — marked %s (%s)",
+            task_id, inner_budget, new_status, JOB_TIMEOUT_REASON,
         )
     except IllegalTransitionError as exc:
         # Deterministic guard fired: log loudly, never silently update status.

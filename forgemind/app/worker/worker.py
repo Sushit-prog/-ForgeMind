@@ -52,6 +52,10 @@ async def _sweep_pending_tasks(ctx: dict) -> None:
 
 
 async def _on_startup(ctx: dict) -> None:
+    logger.info(
+        "arq job timeout ceiling: %ss (settings.worker_job_timeout_seconds)",
+        get_settings().worker_job_timeout_seconds,
+    )
     await _sweep_pending_tasks(ctx)
 
 
@@ -73,6 +77,7 @@ class WorkerSettings:
     on_shutdown = _on_shutdown
     redis_settings = get_redis_settings()
     max_tries = MAX_TRIES
+    job_timeout = get_settings().worker_job_timeout_seconds
 
 
 if __name__ == "__main__":
@@ -86,5 +91,6 @@ if __name__ == "__main__":
             on_startup=_on_startup,
             on_shutdown=_on_shutdown,
             max_tries=MAX_TRIES,
+            job_timeout=get_settings().worker_job_timeout_seconds,
         ).run()
     )
