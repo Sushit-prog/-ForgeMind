@@ -95,7 +95,9 @@ class PlanningAgent(Agent):
 
                 repository = ctx.db.get(Repository, task.repository_id)
                 if repository is not None:
-                    repo_metadata = RepositoryDiscovery().get_cached_metadata(repository)
+                    repo_metadata = RepositoryDiscovery().get_cached_metadata(
+                        repository
+                    )
             except Exception:  # noqa: BLE001 — metadata is a nice-to-have
                 logger.debug("planner: repo metadata unavailable", exc_info=True)
 
@@ -185,7 +187,9 @@ class PlanningAgent(Agent):
         db.commit()
         logger.info(
             "Planner persisted plan %s for task %s (%d steps)",
-            row.id, task.id, len(plan.steps),
+            row.id,
+            task.id,
+            len(plan.steps),
         )
 
     def _persist_failure(
@@ -202,7 +206,9 @@ class PlanningAgent(Agent):
         )
         db.add(row)
         db.commit()
-        logger.error("Planner failed for task %s (%s); raw output preserved", task.id, reason)
+        logger.error(
+            "Planner failed for task %s (%s); raw output preserved", task.id, reason
+        )
 
 
 def build_provider(role: str = "planner"):
@@ -214,18 +220,41 @@ def build_provider(role: str = "planner"):
 
     ``role`` selects the stub provider's per-schema script (research vs
     developer propose different first tool calls), so each agent builds its
-    own provider with a script correct for ITS loop.
+    own provider with a script correct for ITS loop. On the real-provider
+    path ``role`` selects the model (LLM_MODEL_<ROLE>) and optional
+    fallback chain (LLM_MODEL_<ROLE>_FALLBACKS): when a chain is configured
+    and has more than one entry, a FallbackLLMProvider hops to the next
+    model only after the current one's bounded transient-retry budget is
+    exhausted; otherwise the plain single-model OpenRouterProvider, exactly
+    as before.
     """
+    from app.llm.config import get_fallback_models_for_role, get_model_for_role
+    from app.llm.fallback import FallbackLLMProvider
     from app.llm.mock import StubLLMProvider, default_by_schema
     from app.llm.openrouter import OpenRouterProvider
 
     settings = get_settings()
     if settings.openrouter_api_key:
-        return OpenRouterProvider(
-            api_key=settings.openrouter_api_key,
-            base_url=settings.openrouter_base_url,
-            model=get_model_for_role("planner"),
-            timeout_seconds=settings.llm_timeout_seconds,
+        api_key = settings.openrouter_api_key
+        primary = get_model_for_role(role)
+        fallbacks = get_fallback_models_for_role(role)
+        # Unset models are dropped: an unset primary must not silently become
+        # a fallback hop (a missing model fails loudly, as before).
+        chain = [model_name for model_name in (primary, *fallbacks) if model_name]
+
+        def _provider(model_name: str | None) -> OpenRouterProvider:
+            return OpenRouterProvider(
+                api_key=api_key,
+                base_url=settings.openrouter_base_url,
+                model=model_name,
+                timeout_seconds=settings.llm_timeout_seconds,
+            )
+
+        if len(chain) < 2:
+            return _provider(primary)
+        return FallbackLLMProvider(
+            [(model_name, _provider(model_name)) for model_name in chain],
+            max_retries=settings.llm_max_retries,
         )
     if os.environ.get("FORGEMIND_MOCK_LLM") == "1":
         flaky = os.environ.get("FORGEMIND_MOCK_LLM_FLAKY") == "1"
@@ -244,7 +273,9 @@ def build_provider(role: str = "planner"):
             retry = {
                 "retry_by_schema": {
                     "ToolCallProposal": [
-                        WRITE_RETRY_PROPOSAL, COMMIT_PROPOSAL, FINAL_PROPOSAL,
+                        WRITE_RETRY_PROPOSAL,
+                        COMMIT_PROPOSAL,
+                        FINAL_PROPOSAL,
                     ]
                 },
                 "retry_marker": "FIX INSTRUCTION (DATA)",
@@ -257,7 +288,11 @@ def build_provider(role: str = "planner"):
             # Enabled by env so the plain happy path (approve first time)
             # stays the default for other e2e tests.
             if os.environ.get("FORGEMIND_MOCK_REVIEW_REJECT") == "1":
-                from app.llm.mock import FIXED_VALUE_MARKER, REVIEW_APPROVE, REVIEW_REJECT
+                from app.llm.mock import (
+                    FIXED_VALUE_MARKER,
+                    REVIEW_APPROVE,
+                    REVIEW_REJECT,
+                )
 
                 retry = {
                     "retry_by_schema": {"ReviewResult": [REVIEW_APPROVE]},

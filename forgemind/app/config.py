@@ -148,6 +148,60 @@ class Settings(BaseSettings):
         default=None,
         description="Model for the security agent (env: LLM_MODEL_SECURITY).",
     )
+    llm_model_research: str | None = Field(
+        default=None,
+        description="Model for the research agent (env: LLM_MODEL_RESEARCH).",
+    )
+    llm_model_developer: str | None = Field(
+        default=None,
+        description="Model for the developer agent (env: LLM_MODEL_DEVELOPER).",
+    )
+    # Optional per-role FALLBACK CHAINS: comma-separated model slugs tried in
+    # order when the primary model keeps returning transient errors (429
+    # free-tier rate limits above all — see FallbackLLMProvider). Empty/unset
+    # means no fallback: single-model behavior unchanged.
+    llm_model_planner_fallbacks: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated fallback models for the planning agent "
+            "(env: LLM_MODEL_PLANNER_FALLBACKS)."
+        ),
+    )
+    llm_model_research_fallbacks: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated fallback models for the research agent "
+            "(env: LLM_MODEL_RESEARCH_FALLBACKS)."
+        ),
+    )
+    llm_model_developer_fallbacks: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated fallback models for the developer agent "
+            "(env: LLM_MODEL_DEVELOPER_FALLBACKS)."
+        ),
+    )
+    llm_model_debugger_fallbacks: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated fallback models for the debugger agent "
+            "(env: LLM_MODEL_DEBUGGER_FALLBACKS)."
+        ),
+    )
+    llm_model_reviewer_fallbacks: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated fallback models for the reviewer agent "
+            "(env: LLM_MODEL_REVIEWER_FALLBACKS)."
+        ),
+    )
+    llm_model_security_fallbacks: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated fallback models for the security agent "
+            "(env: LLM_MODEL_SECURITY_FALLBACKS)."
+        ),
+    )
     # GitHub integration (Phase 10). GITHUB_TOKEN is the ONLY credential and
     # a SECRET — loaded from env only, never hardcoded, never logged. The
     # base URL is configurable for GitHub Enterprise / self-hosted gateways.
