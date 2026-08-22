@@ -85,6 +85,20 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = Field(
         default=None, description="OpenRouter API key (secret — never logged)."
     )
+    groq_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Groq API key for roles whose model slug carries the 'groq::' "
+            "backend prefix (secret — never logged)."
+        ),
+    )
+    nvidia_api_key: str | None = Field(
+        default=None,
+        description=(
+            "NVIDIA build.nvidia.com API key for roles whose model slug "
+            "carries the 'nvidia::' backend prefix (secret — never logged)."
+        ),
+    )
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1",
         description="OpenAI-compatible base URL (self-hosted gateways supported).",

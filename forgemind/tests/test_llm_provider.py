@@ -116,8 +116,9 @@ def test_is_transient_error_classification() -> None:
 
 import logging
 
-import app.llm.openrouter as openrouter_module
-from app.llm.openrouter import OpenRouterProvider
+import app.llm.openai_compat as compat_module
+from app.llm.openai_compat import OpenAICompatibleProvider
+from app.llm.openrouter import OpenRouterProvider  # shim alias still works
 from app.llm.provider import Message
 
 
@@ -147,14 +148,16 @@ class _FakeAsyncClient:
 
 def _patch_http(monkeypatch, payload) -> None:
     monkeypatch.setattr(
-        openrouter_module.httpx,
+        compat_module.httpx,
         "AsyncClient",
         lambda **kwargs: _FakeAsyncClient(_FakeResponse(payload)),
     )
 
 
-def _provider() -> OpenRouterProvider:
-    return OpenRouterProvider(api_key="k", model="test-model")
+def _provider() -> OpenAICompatibleProvider:
+    return OpenAICompatibleProvider(
+        api_key="k", base_url="https://openrouter.ai/api/v1", model="test-model"
+    )
 
 
 def test_null_content_raises_transient_503_with_diagnostics(
@@ -170,7 +173,7 @@ def test_null_content_raises_transient_503_with_diagnostics(
     }
     _patch_http(monkeypatch, payload)
 
-    with caplog.at_level(logging.WARNING, logger="app.llm.openrouter"):
+    with caplog.at_level(logging.WARNING, logger="app.llm.openai_compat"):
         with pytest.raises(LLMProviderError) as exc_info:
             asyncio.run(_provider().generate([Message(role="user", content="hi")]))
 
@@ -206,7 +209,7 @@ def test_no_choices_error_envelope_raises_transient_503(
     }
     _patch_http(monkeypatch, payload)
 
-    with caplog.at_level(logging.WARNING, logger="app.llm.openrouter"):
+    with caplog.at_level(logging.WARNING, logger="app.llm.openai_compat"):
         with pytest.raises(LLMProviderError) as exc_info:
             asyncio.run(_provider().generate([Message(role="user", content="hi")]))
 

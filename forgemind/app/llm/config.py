@@ -15,7 +15,32 @@ behavior unchanged.
 
 from __future__ import annotations
 
+import re
+
 from app.config import get_settings
+
+# Model slugs may carry a backend prefix selecting which OpenAI-compatible
+# endpoint serves them: "groq::openai/gpt-oss-120b", "nvidia::meta/…". A bare
+# slug defaults to the OpenRouter endpoint — byte-for-byte today's behavior.
+_BACKEND_PREFIX_RE = re.compile(r"^([a-z][a-z0-9_]*)::(.+)$")
+
+KNOWN_BACKENDS = frozenset({"openrouter", "groq", "nvidia"})
+
+
+def split_backend_slug(entry: str) -> tuple[str, str]:
+    """Split ``"groq::openai/gpt-oss-120b"`` -> ``("groq", "openai/gpt-oss-120b")``.
+
+    Bare slugs resolve to ``("openrouter", entry)``. The backend NAME is
+    returned even when unknown — callers (build_provider) fail loudly on
+    unknown backends so typos like ``groq:::`` or ``grog::`` never silently
+    route to OpenRouter.
+    """
+    entry = entry.strip()
+    match = _BACKEND_PREFIX_RE.match(entry)
+    if match:
+        return match.group(1), match.group(2)
+    return "openrouter", entry
+
 
 # role -> settings field that carries the model (env: LLM_MODEL_<ROLE>).
 # Keys MUST match the ``role`` strings callers pass to build_provider

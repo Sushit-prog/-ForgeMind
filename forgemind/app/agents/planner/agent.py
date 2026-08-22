@@ -214,9 +214,9 @@ class PlanningAgent(Agent):
 def build_provider(role: str = "planner"):
     """Construct the LLM provider from settings/env (shared by all agents).
 
-    Order: real OpenRouter when a key is configured; else the stub
-    provider when ``FORGEMIND_MOCK_LLM=1`` (tests / key-less dev); else a
-    clear ``PlannerConfigError``.
+    Order: a real backend when any API key is configured (OpenRouter,
+    Groq, NVIDIA); else the stub provider when ``FORGEMIND_MOCK_LLM=1``
+    (tests / key-less dev); else a clear ``PlannerConfigError``.
 
     ``role`` selects the stub provider's per-schema script (research vs
     developer propose different first tool calls), so each agent builds its
@@ -225,37 +225,24 @@ def build_provider(role: str = "planner"):
     fallback chain (LLM_MODEL_<ROLE>_FALLBACKS): when a chain is configured
     and has more than one entry, a FallbackLLMProvider hops to the next
     model only after the current one's bounded transient-retry budget is
-    exhausted; otherwise the plain single-model OpenRouterProvider, exactly
-    as before.
+    exhausted; otherwise the plain single-model provider, exactly as
+    before.
+
+    Each chain entry may carry a backend prefix selecting its endpoint:
+    ``groq::slug`` -> Groq, ``nvidia::slug`` -> NVIDIA's integrate API,
+    bare slug -> OpenRouter (default). Chains may mix backends freely.
     """
-    from app.llm.config import get_fallback_models_for_role, get_model_for_role
+    from app.llm.config import (
+        get_fallback_models_for_role,
+        get_model_for_role,
+        split_backend_slug,
+    )
     from app.llm.fallback import FallbackLLMProvider
     from app.llm.mock import StubLLMProvider, default_by_schema
-    from app.llm.openrouter import OpenRouterProvider
+    from app.llm.openai_compat import BACKENDS, OpenAICompatibleProvider
+
 
     settings = get_settings()
-    if settings.openrouter_api_key:
-        api_key = settings.openrouter_api_key
-        primary = get_model_for_role(role)
-        fallbacks = get_fallback_models_for_role(role)
-        # Unset models are dropped: an unset primary must not silently become
-        # a fallback hop (a missing model fails loudly, as before).
-        chain = [model_name for model_name in (primary, *fallbacks) if model_name]
-
-        def _provider(model_name: str | None) -> OpenRouterProvider:
-            return OpenRouterProvider(
-                api_key=api_key,
-                base_url=settings.openrouter_base_url,
-                model=model_name,
-                timeout_seconds=settings.llm_timeout_seconds,
-            )
-
-        if len(chain) < 2:
-            return _provider(primary)
-        return FallbackLLMProvider(
-            [(model_name, _provider(model_name)) for model_name in chain],
-            max_retries=settings.llm_max_retries,
-        )
     if os.environ.get("FORGEMIND_MOCK_LLM") == "1":
         flaky = os.environ.get("FORGEMIND_MOCK_LLM_FLAKY") == "1"
         retry = None
@@ -320,11 +307,70 @@ def build_provider(role: str = "planner"):
         return StubLLMProvider(
             by_schema=default_by_schema(flaky_planner=flaky, agent=role), **retry or {}
         )
-    raise PlannerConfigError(
-        "no LLM provider configured: set OPENROUTER_API_KEY (and LLM_MODEL_PLANNER) "
-        "or FORGEMIND_MOCK_LLM=1 for key-less development"
-    )
+    backend_keys = {
+        "openrouter": settings.openrouter_api_key,
+        "groq": settings.groq_api_key,
+        "nvidia": settings.nvidia_api_key,
+    }
 
+    def _key_for(backend: str) -> str:
+        key = backend_keys.get(backend)
+        if not key:
+            raise PlannerConfigError(
+                f"role '{role}': no API key configured for backend '{backend}' "
+                f"(set {backend.upper()}_API_KEY)"
+            )
+        return key
+
+    primary = get_model_for_role(role)
+    fallbacks = get_fallback_models_for_role(role)
+    # Unset models are dropped: an unset primary must not silently become
+    # a fallback hop (a missing model fails loudly, as before).
+    chain_entries = [model_name for model_name in (primary, *fallbacks) if model_name]
+
+    resolved: list[tuple[str, str, str, str]] = []  # (entry, slug, backend, api_key)
+    for model_name in chain_entries:
+        backend, slug = split_backend_slug(model_name)
+        if backend not in BACKENDS:
+            raise PlannerConfigError(
+                f"role '{role}': unknown backend '{backend}' in model "
+                f"'{model_name}' (known: {sorted(BACKENDS)})"
+            )
+        resolved.append((model_name, slug, backend, _key_for(backend)))
+
+    if not resolved and not any(backend_keys.values()):
+        raise PlannerConfigError(
+            "no LLM provider configured: set OPENROUTER_API_KEY / GROQ_API_KEY / "
+            "NVIDIA_API_KEY (and LLM_MODEL_<ROLE>), or FORGEMIND_MOCK_LLM=1 "
+            "for key-less development"
+        )
+
+    def _provider(entry: tuple[str, str, str, str]) -> OpenAICompatibleProvider:
+        _, slug, backend, api_key = entry
+        return OpenAICompatibleProvider(
+            api_key=api_key,
+            base_url=BACKENDS[backend],
+            model=slug,
+            timeout_seconds=settings.llm_timeout_seconds,
+        )
+
+    if len(resolved) < 2:
+        if resolved:
+            return _provider(resolved[0])
+        # Keys configured but no models for this role: keep today's behavior
+        # of returning a real-endpoint provider with no model (fails loudly
+        # at call time naming the missing LLM_MODEL_<ROLE>). Uses whichever
+        # OpenRouter-compatible endpoint the deployment prefers.
+        return OpenAICompatibleProvider(
+            api_key=settings.openrouter_api_key or "",
+            base_url=settings.openrouter_base_url,
+            model=None,
+            timeout_seconds=settings.llm_timeout_seconds,
+        )
+    return FallbackLLMProvider(
+        [(entry[0], _provider(entry)) for entry in resolved],
+        max_retries=settings.llm_max_retries,
+    )
 
 def build_planner() -> PlanningAgent:
     """Construct the planner from settings/env — used by the worker."""
