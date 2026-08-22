@@ -202,6 +202,17 @@ class Settings(BaseSettings):
             "(env: LLM_MODEL_SECURITY_FALLBACKS)."
         ),
     )
+    # repository.list_files output bounding: on a huge real-world tree
+    # (45k+ files) the full listing once serialized to ~3 MB of tool output
+    # (~775k tokens) and blew the model's context window outright.
+    list_files_max_entries: int = Field(
+        default=1000,
+        description=(
+            "Max entries returned by repository.list_files before truncation; "
+            "results are ordered shallow-first and carry an explicit "
+            "truncation notice (env: LIST_FILES_MAX_ENTRIES)."
+        ),
+    )
     # GitHub integration (Phase 10). GITHUB_TOKEN is the ONLY credential and
     # a SECRET — loaded from env only, never hardcoded, never logged. The
     # base URL is configurable for GitHub Enterprise / self-hosted gateways.

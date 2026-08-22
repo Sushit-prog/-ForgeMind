@@ -45,7 +45,13 @@ class ListFilesInput(BaseModel):
 
 
 class ListFilesOutput(BaseModel):
+    """Bounded listing. When ``truncated`` is set, ``files`` ends with an
+    explicit sentinel entry so the CONSUMER (an LLM) cannot miss that it is
+    seeing a partial view, and ``total_entries`` carries the true count."""
+
     files: list[str]
+    truncated: bool = False
+    total_entries: int | None = None
 
 
 def _root_for(ctx: ExecutionContext, worktree_id: uuid.UUID):
@@ -63,7 +69,9 @@ class ReadFileTool(Tool):
     capabilities: list[str] = ["repo.read"]
     risk = "LOW"
 
-    async def execute(self, input: ReadFileInput, ctx: ExecutionContext) -> ReadFileOutput:
+    async def execute(
+        self, input: ReadFileInput, ctx: ExecutionContext
+    ) -> ReadFileOutput:
         content = FileAccess(_root_for(ctx, input.worktree_id)).read_file(input.path)
         return ReadFileOutput(path=input.path, content=content)
 
@@ -91,9 +99,28 @@ class ListFilesTool(Tool):
     capabilities: list[str] = ["repo.read"]
     risk = "LOW"
 
-    async def execute(self, input: ListFilesInput, ctx: ExecutionContext) -> ListFilesOutput:
+    async def execute(
+        self, input: ListFilesInput, ctx: ExecutionContext
+    ) -> ListFilesOutput:
+        from app.config import get_settings
+
         files = FileAccess(_root_for(ctx, input.worktree_id)).list_files(input.path)
-        return ListFilesOutput(files=files)
+        total = len(files)
+        max_entries = get_settings().list_files_max_entries
+        if total <= max_entries:
+            # Under-cap trees keep today's exact behavior (alphabetical,
+            # complete) — bounded output only exists for oversized trees.
+            return ListFilesOutput(files=files)
+        # Depth-first ordering (shallowest paths first): the agent gets a
+        # progressively deeper map of the repo instead of an alphabetical
+        # slab owned by whichever directory sorts first.
+        files.sort(key=lambda p: (p.count("/"), p))
+        kept = files[:max_entries]
+        kept.append(
+            f"[truncated: showing {max_entries} of {total} total entries "
+            "-- use a more specific path to see more]"
+        )
+        return ListFilesOutput(files=kept, truncated=True, total_entries=total)
 
 
 REPOSITORY_TOOLS: list[Tool] = [ReadFileTool(), SearchTool(), ListFilesTool()]

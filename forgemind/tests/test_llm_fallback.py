@@ -169,8 +169,10 @@ def test_build_provider_honors_role_on_real_provider_path(monkeypatch) -> None:
     monkeypatch.delenv("FORGEMIND_MOCK_LLM", raising=False)
     monkeypatch.setenv("LLM_MODEL_PLANNER", "planner-primary")
     monkeypatch.setenv("LLM_MODEL_RESEARCH", "research-primary")
-    for env_name in ("LLM_MODEL_PLANNER_FALLBACKS", "LLM_MODEL_RESEARCH_FALLBACKS"):
-        monkeypatch.delenv(env_name, raising=False)
+    # Present-but-empty BEATS the dotenv layer (a real .env may carry
+    # fallback chains); delenv alone would let .env values leak through.
+    monkeypatch.setenv("LLM_MODEL_PLANNER_FALLBACKS", "")
+    monkeypatch.setenv("LLM_MODEL_RESEARCH_FALLBACKS", "")
     get_settings.cache_clear()
 
     try:
@@ -192,7 +194,8 @@ def test_build_provider_without_fallbacks_returns_plain_provider(monkeypatch) ->
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.delenv("FORGEMIND_MOCK_LLM", raising=False)
     monkeypatch.setenv("LLM_MODEL_DEBUGGER", "debugger-primary")
-    monkeypatch.delenv("LLM_MODEL_DEBUGGER_FALLBACKS", raising=False)
+    # Empty-string beats the dotenv layer (see honors_role test).
+    monkeypatch.setenv("LLM_MODEL_DEBUGGER_FALLBACKS", "")
     get_settings.cache_clear()
 
     try:

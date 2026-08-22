@@ -36,7 +36,9 @@ def plans_for(db_session, task_id) -> list[PlanRow]:
 
 
 def steps_for(db_session, plan_id) -> list[PlanStepRow]:
-    return list(db_session.scalars(select(PlanStepRow).where(PlanStepRow.plan_id == plan_id)))
+    return list(
+        db_session.scalars(select(PlanStepRow).where(PlanStepRow.plan_id == plan_id))
+    )
 
 
 def test_planner_has_no_capabilities() -> None:
@@ -105,8 +107,18 @@ def test_dag_invalid_plan_triggers_retry(db_session, repo_task) -> None:
         {
             "objective": "x",
             "steps": [
-                {"id": "a", "step_type": "research", "description": "a", "depends_on": ["b"]},
-                {"id": "b", "step_type": "implement", "description": "b", "depends_on": ["a"]},
+                {
+                    "id": "a",
+                    "step_type": "research",
+                    "description": "a",
+                    "depends_on": ["b"],
+                },
+                {
+                    "id": "b",
+                    "step_type": "implement",
+                    "description": "b",
+                    "depends_on": ["a"],
+                },
             ],
         }
     )
@@ -177,6 +189,10 @@ def test_near_empty_objective_produces_valid_plan(db_session, repo_task) -> None
 
 def test_planner_config_error_without_key_or_mock(monkeypatch) -> None:
     monkeypatch.delenv("FORGEMIND_MOCK_LLM", raising=False)
+    # Present-but-empty beats the dotenv layer: the repo's real .env may
+    # carry a genuine OPENROUTER_API_KEY, which would otherwise satisfy the
+    # planner and this test's "nothing configured" premise.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
     from app.config import get_settings
 
     # Re-read settings from the (monkeypatched) env so the assertion is
