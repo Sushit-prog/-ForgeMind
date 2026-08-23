@@ -47,7 +47,9 @@ class RunTestTool(Tool):
     capabilities: list[str] = ["shell.test"]
     risk = "LOW"
 
-    async def execute(self, input: RunTestInput, ctx: ExecutionContext) -> RunTestOutput:
+    async def execute(
+        self, input: RunTestInput, ctx: ExecutionContext
+    ) -> RunTestOutput:
         if ctx.db is None:
             raise RuntimeError("ExecutionContext.db is required for shell tools")
 
@@ -58,7 +60,9 @@ class RunTestTool(Tool):
             raise RuntimeError(f"worktree row missing for {input.worktree_id}")
         repository = ctx.db.get(Repository, wt.repository_id)
         if repository is None:
-            raise RuntimeError(f"repository row missing for worktree {input.worktree_id}")
+            raise RuntimeError(
+                f"repository row missing for worktree {input.worktree_id}"
+            )
 
         from app.config import get_settings
 
@@ -67,7 +71,13 @@ class RunTestTool(Tool):
             repository.test_command,
             get_settings().test_timeout_seconds,
         )
-        result = runner.run()  # raises TestCommandError for a mis-stored command
+        # subprocess.run with up to test_timeout_seconds — a full pipeline
+        # stage of blocking I/O; must never run on the event loop (Fix 3).
+        import asyncio
+
+        result = await asyncio.to_thread(
+            runner.run
+        )  # raises TestCommandError for a mis-stored command
         return RunTestOutput(
             exit_code=result.exit_code,
             output=result.output,

@@ -100,9 +100,14 @@ async def advance_task(ctx: dict, task_id: str) -> None:
         # over for each task (see module docstring). The tester is
         # deterministic (no LLM provider at all) and every other agent's
         # provider is per-job like the rest.
-        inner_budget = max(
-            get_settings().worker_job_timeout_seconds - _JOB_TIMEOUT_MARGIN_SECONDS,
-            MIN_INNER_BUDGET_SECONDS,
+        settings = get_settings()
+        inner_budget = (
+            settings.worker_inner_deadline_seconds
+            if settings.worker_inner_deadline_seconds is not None
+            else max(
+                settings.worker_job_timeout_seconds - _JOB_TIMEOUT_MARGIN_SECONDS,
+                MIN_INNER_BUDGET_SECONDS,
+            )
         )
         async with asyncio.timeout(inner_budget):
             new_status = await advance_task_with_agents(

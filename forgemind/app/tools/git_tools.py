@@ -7,6 +7,7 @@ exists in this phase; nothing here ever touches the default branch.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from pydantic import BaseModel, Field
@@ -96,7 +97,7 @@ class StatusTool(Tool):
         self, input: WorktreeInput, ctx: ExecutionContext
     ) -> StatusOutput:
         ops, _ = _ops_for(ctx, input.worktree_id)
-        return StatusOutput(status=ops.status())
+        return StatusOutput(status=(await asyncio.to_thread(ops.status)))
 
 
 class DiffTool(Tool):
@@ -112,7 +113,13 @@ class DiffTool(Tool):
 
     async def execute(self, input: DiffInput, ctx: ExecutionContext) -> DiffOutput:
         ops, _ = _ops_for(ctx, input.worktree_id)
-        return DiffOutput(diff=ops.diff(staged=input.staged, commit=input.commit))
+        return DiffOutput(
+            diff=(
+                await asyncio.to_thread(
+                    ops.diff, staged=input.staged, commit=input.commit
+                )
+            )
+        )
 
 
 class LogTool(Tool):
@@ -125,7 +132,7 @@ class LogTool(Tool):
 
     async def execute(self, input: LogInput, ctx: ExecutionContext) -> LogOutput:
         ops, _ = _ops_for(ctx, input.worktree_id)
-        return LogOutput(commits=ops.log(limit=input.limit))
+        return LogOutput(commits=(await asyncio.to_thread(ops.log, limit=input.limit)))
 
 
 class CreateBranchTool(Tool):
@@ -140,7 +147,9 @@ class CreateBranchTool(Tool):
         self, input: CreateBranchInput, ctx: ExecutionContext
     ) -> CreateBranchOutput:
         ops, _ = _ops_for(ctx, input.worktree_id)
-        return CreateBranchOutput(branch=ops.create_branch(input.name))
+        return CreateBranchOutput(
+            branch=(await asyncio.to_thread(ops.create_branch, input.name))
+        )
 
 
 class CommitTool(Tool):
@@ -153,7 +162,7 @@ class CommitTool(Tool):
 
     async def execute(self, input: CommitInput, ctx: ExecutionContext) -> CommitOutput:
         ops, _ = _ops_for(ctx, input.worktree_id)
-        return CommitOutput(sha=ops.commit(input.message))
+        return CommitOutput(sha=(await asyncio.to_thread(ops.commit, input.message)))
 
 
 class PushTool(Tool):
@@ -196,7 +205,9 @@ class PushTool(Tool):
                 "pushing to the upstream reference is structurally forbidden"
             )
         ops, _ = _ops_for(ctx, input.worktree_id)
-        branch = ops.push(fork_url, token=get_settings().github_token)
+        branch = await asyncio.to_thread(
+            ops.push, fork_url, token=get_settings().github_token
+        )
         return PushOutput(branch=branch, fork_url=fork_url)
 
 

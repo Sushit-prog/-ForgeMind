@@ -291,6 +291,16 @@ class Settings(BaseSettings):
             "(env: WORKER_JOB_TIMEOUT_SECONDS)."
         ),
     )
+    # Optional direct override of the worker's INNER deadline (the
+    # asyncio.timeout around one advance_task invocation). None = derive as
+    # worker_job_timeout_seconds - 30 (floored at 60). Tests set this small
+    # to prove the deadline actually fires while a DB call blocks in a
+    # thread — the failure mode that was structurally inert before Fix 3.
+    worker_inner_deadline_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        description="Explicit inner deadline override (env: WORKER_INNER_DEADLINE_SECONDS).",
+    )
     # GitHub integration (Phase 10). GITHUB_TOKEN is the ONLY credential and
     # a SECRET — loaded from env only, never hardcoded, never logged. The
     # base URL is configurable for GitHub Enterprise / self-hosted gateways.

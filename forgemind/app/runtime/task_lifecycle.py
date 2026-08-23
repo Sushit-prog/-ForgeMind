@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta
@@ -230,9 +231,15 @@ async def advance_task_with_agents(
     Any agent may be None (no provider configured) — the task then fails
     cleanly instead of hanging.
     """
-    task = db.execute(
-        select(Task).where(Task.id == task_id).with_for_update()
-    ).scalar_one_or_none()
+    # Off the event loop (Fix 3): this cross-session lock acquire is the
+    # exact statement whose synchronous wait froze the entire arq loop in
+    # the root-caused deadlock. In a thread, other tasks keep running and
+    # the inner deadline can fire; DB-side lock_timeout bounds the wait.
+    task = await asyncio.to_thread(
+        lambda: db.execute(
+            select(Task).where(Task.id == task_id).with_for_update()
+        ).scalar_one_or_none()
+    )
     if task is None:
         logger.warning("advance_task_with_agents: task %s not found", task_id)
         return None
@@ -258,7 +265,9 @@ async def advance_task_with_agents(
         return await _run_pr_creation(db, task, github)
     if current is TaskStatus.AWAITING_APPROVAL:
         return await _run_awaiting_approval(db, task)
-    return advance_task_once(db, task_id)
+    # Sync stub driver does a full stage of blocking DB + subprocess work —
+    # run it off the event loop like the real agent handlers do.
+    return await asyncio.to_thread(advance_task_once, db, task_id)
 
 
 def _latest_fix_instruction(db: Session, task_id: uuid.UUID) -> str | None:
@@ -653,7 +662,10 @@ async def _run_testing(db: Session, task: Task, tester) -> TaskStatus:
 
     ctx = ExecutionContext(task_id=task.id, agent_type="tester", db=db)
     try:
-        worktree = WorktreeManager(db).get_or_create_for_task(task)
+        # git worktree add = subprocess — off the event loop (Fix 3).
+        worktree = await asyncio.to_thread(
+            WorktreeManager(db).get_or_create_for_task, task
+        )
         result = await tester.run(task, worktree, ctx)
     except TestError as exc:
         logger.error("Task %s testing failed: %s", task.id, exc)
@@ -1044,8 +1056,10 @@ async def _run_verification(db: Session, task: Task) -> TaskStatus:
         )
 
     try:
-        worktree = WorktreeManager(db).get_or_create_for_task(task)
-        head = GitOperations(worktree.path).head_sha()
+        worktree = await asyncio.to_thread(
+            WorktreeManager(db).get_or_create_for_task, task
+        )
+        head = await asyncio.to_thread(GitOperations(worktree.path).head_sha)
     except Exception as exc:  # noqa: BLE001 — a missing worktree is stale, not a crash
         logger.warning(
             "Task %s verification stale: cannot read worktree HEAD (%s)", task.id, exc

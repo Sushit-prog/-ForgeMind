@@ -14,6 +14,7 @@ pipeline — the agent never gets to "just try it".
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import ClassVar
@@ -104,7 +105,9 @@ class ResearchAgent(Agent):
         self.provider = provider
         settings = get_settings()
         self.max_tool_calls = (
-            settings.max_research_tool_calls if max_tool_calls is None else max_tool_calls
+            settings.max_research_tool_calls
+            if max_tool_calls is None
+            else max_tool_calls
         )
         self.timeout_retries = (
             settings.llm_max_retries if timeout_retries is None else timeout_retries
@@ -120,7 +123,8 @@ class ResearchAgent(Agent):
             raise ResearchError("ExecutionContext.db is required for research")
         db = ctx.db
 
-        worktree = self._ensure_worktree(db, task)
+        # git worktree add is a subprocess — off the event loop (Fix 3).
+        worktree = await asyncio.to_thread(self._ensure_worktree, db, task)
         messages = build_research_messages(task, plan_step, repo_metadata=None)
         observations: list[Observation] = []
 
@@ -148,7 +152,9 @@ class ResearchAgent(Agent):
                 continue
 
             if proposal.final:
-                return await self._synthesize(db, task, messages, observations, forced=False)
+                return await self._synthesize(
+                    db, task, messages, observations, forced=False
+                )
 
             obs = await self._execute_tool(proposal.tool_call, worktree.id, db, task.id)
             observations.append(obs)
@@ -255,7 +261,9 @@ class ResearchAgent(Agent):
                 self._persist(db, task, artifact)
                 logger.info(
                     "Research artifact persisted for task %s (confidence %s, %d files)",
-                    task.id, artifact.confidence, len(artifact.relevant_files),
+                    task.id,
+                    artifact.confidence,
+                    len(artifact.relevant_files),
                 )
                 return artifact
 
