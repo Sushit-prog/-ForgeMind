@@ -69,6 +69,14 @@ class Task(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
 
+    # How many times the periodic stale-CREATED sweep has re-enqueued this
+    # task because its original enqueue was lost. Bounded: exhausting
+    # sweep_stale_created_max_attempts escalates the task to
+    # FAILED(enqueue_lost) instead of sweeping forever.
+    enqueue_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

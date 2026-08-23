@@ -67,6 +67,32 @@ class Settings(BaseSettings):
     # need exact control over queued jobs.
     worker_sweep_enabled: bool = True
 
+    # Periodic stale-CREATED sweep (cron, ~every minute): heals an enqueue
+    # LOST after POST /tasks committed the row — the startup sweep can't see
+    # those because workers were already running when Redis dropped the job.
+    # Threshold must sit comfortably above normal planning-phase latency so a
+    # healthy CREATED task is never double-enqueued (a duplicate would be a
+    # harmless no-op anyway: row lock + state machine).
+    sweep_stale_created_seconds: int = Field(
+        default=120,
+        ge=1,
+        description=(
+            "Age (seconds) a CREATED task must reach before the periodic "
+            "sweep re-enqueues it (env: SWEEP_STALE_CREATED_SECONDS)."
+        ),
+    )
+    # Bounded retries for that sweep: a task re-enqueued this many times and
+    # STILL stuck in CREATED is escalated to FAILED(enqueue_lost) with an
+    # audit entry instead of sweeping forever.
+    sweep_stale_created_max_attempts: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Max periodic-sweep recoveries per task before escalation "
+            "(env: SWEEP_STALE_CREATED_MAX_ATTEMPTS)."
+        ),
+    )
+
     # Master switch for the arq queue. When False (hermetic unit tests), the
     # API still creates/persists tasks but never touches Redis — the worker's
     # startup sweep would pick them up if a queue were present.
