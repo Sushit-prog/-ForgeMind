@@ -80,6 +80,9 @@ What makes it hold together:
 
 ## Quick start
 
+All commands below run from the `forgemind/` directory (where
+`docker-compose.yml`, `.env.example`, and the `app` package live).
+
 ```bash
 # 1. Postgres + Redis + worker (worker runs migrations on boot)
 docker compose up -d --wait
