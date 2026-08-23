@@ -211,15 +211,21 @@ app/
                      reviewer · security · github — typed loops, fixed capability sets
   api/routes/        tasks (JSON API) · trace (HTML viewer)
   capabilities/      capability value objects + per-agent assignment
+  database/          engine/session + Alembic migrations
   execution/         the tool pipeline: validate → capability → policy → execute → audit
   git/               subprocess runner (arg lists, fixed identity) + per-task worktrees
+  github/            GitHub REST client + deterministic stub (fork push, draft PR)
   llm/               provider abstraction (OpenRouter / deterministic stub) + parse/validate
   models/            Section-G SQLAlchemy schema
   policies/          deterministic policy engine (fail-closed)
   repository/        clone-once cache + traversal-safe read/list/search
   runtime/           state machine (pure logic) · task lifecycle · trace assembly
   schemas/           Pydantic request/response schemas
+  shell/             allowlist-validated test-command runner (arg list, hard timeout,
+                     never shell=True)
   templates/         trace viewer templates (Jinja2, vanilla CSS)
+  tools/             tool registry + built-ins: filesystem · repository · git ·
+                     shell · github (+ examples/)
   worker/            arq entrypoint · advance_task job · startup sweep (crash recovery)
 tests/               hermetic suite (SQLite + git + stubbed LLM)
 tests_e2e/           end-to-end suite (Postgres + Redis + worker subprocesses)
