@@ -56,6 +56,30 @@ class Settings(BaseSettings):
     # Fail-fast startup: how long to wait for the DB before giving up.
     db_connect_timeout_seconds: int = 5
 
+    # DB-side ceilings (Postgres only, applied at connect time). These are
+    # the last line of defense against the duplicate-delivery deadlock
+    # root-caused with py-spy: a sync FOR UPDATE blocked on a row lock froze
+    # the entire arq event loop, so NO Python-level timer could fire.
+    #
+    # lock_timeout=10s is well under the worker's 870s inner deadline: a
+    # stuck lock fails fast and loud (QueryCanceled -> arq retry) instead of
+    # silently eating the whole budget. Normal contention is single-digit
+    # milliseconds — one transition commits before the next job arrives.
+    #
+    # statement_timeout=300s is ~100x every observed statement (all OLTP-
+    # shaped) yet bounds pathological scans. The tester's pytest subprocess
+    # is unaffected: it runs in its own process, outside the DB session.
+    db_lock_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        description="Postgres lock_timeout (seconds) applied per connection.",
+    )
+    db_statement_timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        description="Postgres statement_timeout (seconds) applied per connection.",
+    )
+
     # arq/Redis backing the worker queue (local dev: docker-compose redis).
     redis_url: str = Field(
         default="redis://localhost:6379/0",

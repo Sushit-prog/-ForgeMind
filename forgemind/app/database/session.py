@@ -33,6 +33,14 @@ def build_engine(settings: Settings | None = None) -> Engine:
         # Bound the connect attempt so a dead/unreachable DB fails fast
         # instead of hanging on the OS-level TCP timeout.
         connect_args = {"connect_timeout": settings.db_connect_timeout_seconds}
+        # DB-side ceilings (defense in depth against event-loop freezes):
+        # a lock wait or pathological statement is cancelled by Postgres
+        # itself (QueryCanceled) instead of blocking a sync call on the
+        # worker's event loop forever — where no Python timer can fire.
+        connect_args["options"] = (
+            f"-c statement_timeout={settings.db_statement_timeout_seconds * 1000}"
+            f" -c lock_timeout={settings.db_lock_timeout_seconds * 1000}"
+        )
     return create_engine(
         settings.database_url,
         pool_pre_ping=True,
