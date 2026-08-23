@@ -118,7 +118,7 @@ async def create_task(payload: TaskCreate, db: Session = Depends(get_db)) -> Tas
     # If the queue is unavailable the task stays CREATED and the worker's
     # startup sweep picks it up later.
     try:
-        await enqueue_advance_task(task.id)
+        await enqueue_advance_task(task.id, target_status="PLANNING")
     except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to enqueue advance_task for %s — will be swept later", task.id

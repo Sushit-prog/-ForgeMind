@@ -39,7 +39,7 @@ from app.models.base import utcnow
 from app.runtime.state_machine import TERMINAL_STATES
 from app.runtime.task_lifecycle import transition_task
 from app.worker.jobs.advance_task import advance_task
-from app.worker.queue import JOB_ADVANCE_TASK, get_redis_settings
+from app.worker.queue import JOB_ADVANCE_TASK, advance_job_id, get_redis_settings
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +53,19 @@ async def _sweep_pending_tasks(ctx: dict) -> None:
         return
     db = SessionLocal()
     try:
-        task_ids = db.scalars(
-            select(Task.id).where(
+        rows = db.execute(
+            select(Task.id, Task.status).where(
                 Task.status.not_in([s.value for s in TERMINAL_STATES])
             )
         ).all()
-        for task_id in task_ids:
-            await ctx["redis"].enqueue_job(JOB_ADVANCE_TASK, str(task_id))
-        if task_ids:
-            logger.info("Sweep re-enqueued %d task(s) for recovery", len(task_ids))
+        for task_id, status in rows:
+            await ctx["redis"].enqueue_job(
+                JOB_ADVANCE_TASK,
+                str(task_id),
+                _job_id=advance_job_id(task_id, status),
+            )
+        if rows:
+            logger.info("Sweep re-enqueued %d task(s) for recovery", len(rows))
     finally:
         db.close()
 
@@ -127,7 +131,11 @@ async def sweep_stale_created_once(
                 continue
             task.enqueue_attempts = attempts
             db.commit()
-            await redis.enqueue_job(JOB_ADVANCE_TASK, str(task.id))
+            await redis.enqueue_job(
+                JOB_ADVANCE_TASK,
+                str(task.id),
+                _job_id=advance_job_id(task.id, task.status),
+            )
             logger.warning(
                 "Swept stale CREATED task %s (attempt %d/%d) — re-enqueued",
                 task.id,
@@ -174,6 +182,16 @@ MAX_TRIES = 10
 CRON_JOBS = [cron(_sweep_stale_created, second=0, unique=True, run_at_startup=False)]
 
 
+# Deterministic job ids (queue.advance_job_id) dedupe queued/running jobs,
+# but ONLY while no result key exists under the same id: arq writes one on
+# completion with TTL keep_result. keep_result=0 means no result key is ever
+# written, so after a job finishes the id is immediately reusable for
+# legitimate re-enqueues (recovery sweeps, replan re-entry) while duplicates
+# of a queued/running job are still swallowed. We never read arq results —
+# all state lives in Postgres — so nothing loses functionality.
+KEEP_RESULT = 0
+
+
 class WorkerSettings:
     """arq WorkerSettings — consumed by `arq app.worker.worker.WorkerSettings`."""
 
@@ -184,6 +202,7 @@ class WorkerSettings:
     redis_settings = get_redis_settings()
     max_tries = MAX_TRIES
     job_timeout = get_settings().worker_job_timeout_seconds
+    keep_result = KEEP_RESULT
 
 
 if __name__ == "__main__":
@@ -199,5 +218,6 @@ if __name__ == "__main__":
             on_shutdown=_on_shutdown,
             max_tries=MAX_TRIES,
             job_timeout=get_settings().worker_job_timeout_seconds,
+            keep_result=KEEP_RESULT,
         ).run()
     )

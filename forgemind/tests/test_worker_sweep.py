@@ -21,7 +21,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models import AuditLog, ExecutionEvent, Repository, Task
-from app.worker.queue import JOB_ADVANCE_TASK
+from app.worker.queue import JOB_ADVANCE_TASK, advance_job_id
 from app.worker.worker import (
     ENQUEUE_LOST_REASON,
     SWEEP_ACTOR,
@@ -35,10 +35,10 @@ class FakeRedis:
     """Records enqueued jobs — "what actually reached the queue"."""
 
     def __init__(self) -> None:
-        self.enqueued: list[tuple[str, str]] = []
+        self.enqueued: list[tuple] = []
 
-    async def enqueue_job(self, function: str, *args) -> None:
-        self.enqueued.append((function, *(str(a) for a in args)))
+    async def enqueue_job(self, function: str, *args, **kwargs) -> None:
+        self.enqueued.append((function, *(str(a) for a in args), kwargs.get("_job_id")))
 
 
 @pytest.fixture()
@@ -90,7 +90,9 @@ def test_stale_created_task_is_recovered(db_session, fake_redis) -> None:
     acted = asyncio.run(_one_pass(fake_redis))
 
     assert acted == 1
-    assert fake_redis.enqueued == [(JOB_ADVANCE_TASK, str(task.id))]
+    assert fake_redis.enqueued == [
+        (JOB_ADVANCE_TASK, str(task.id), advance_job_id(task.id, "CREATED"))
+    ]
     db_session.expire_all()
     task = db_session.get(Task, task.id)
     # Still CREATED — recovery is a re-enqueue, not a transition. The next

@@ -34,7 +34,7 @@ from app.database.session import SessionLocal
 from app.models import Task, TaskStatus
 from app.runtime.state_machine import TERMINAL_STATES, IllegalTransitionError
 from app.runtime.task_lifecycle import advance_task_with_agents, transition_task
-from app.worker.queue import JOB_ADVANCE_TASK
+from app.worker.queue import JOB_ADVANCE_TASK, advance_job_id
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,10 @@ async def advance_task(ctx: dict, task_id: str) -> None:
         new_status = _mark_job_timeout_failure(db, task_uuid)
         logger.warning(
             "task %s exceeded %ss inner budget — marked %s (%s)",
-            task_id, inner_budget, new_status, JOB_TIMEOUT_REASON,
+            task_id,
+            inner_budget,
+            new_status,
+            JOB_TIMEOUT_REASON,
         )
     except IllegalTransitionError as exc:
         # Deterministic guard fired: log loudly, never silently update status.
@@ -148,7 +151,11 @@ async def advance_task(ctx: dict, task_id: str) -> None:
         os._exit(1)
 
     if new_status is not None and new_status not in TERMINAL_STATES:
-        await ctx["redis"].enqueue_job(JOB_ADVANCE_TASK, task_id)
+        await ctx["redis"].enqueue_job(
+            JOB_ADVANCE_TASK,
+            task_id,
+            _job_id=advance_job_id(task_id, new_status.value),
+        )
 
     if new_status in (TaskStatus.COMPLETED, TaskStatus.ESCALATED):
         logger.info("Task %s reached terminal state %s", task_id, new_status.value)
