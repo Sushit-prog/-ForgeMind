@@ -18,7 +18,12 @@ from app.models import Base  # noqa: F401 — registers all tables on metadata
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which would flip EVERY
+    # already-created logger (app.worker.worker, app.runtime, ...) to
+    # disabled=True for the rest of the process — silently killing all
+    # later logging from them. Alembic only needs ITS OWN three loggers
+    # from alembic.ini; never disable ours.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 logger = logging.getLogger("alembic.env")
 
