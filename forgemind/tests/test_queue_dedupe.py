@@ -96,3 +96,30 @@ def test_chain_enqueue_uses_next_status_id() -> None:
     tid = uuid.uuid4()
     committed_next = TaskStatus.RESEARCHING.value
     assert advance_job_id(tid, committed_next) == f"advance:{tid}:RESEARCHING"
+
+
+def test_bootstrap_hop_id_differs_from_planning_stage_id() -> None:
+    """Regression (PLANNING self-starve): a fresh CREATED task must be
+    enqueued under :CREATED (its current status — what the sweeps target),
+    so that the CREATED -> PLANNING bootstrap job, whose self-chain
+    re-enqueues :PLANNING, never collides with its own running job key.
+    Before the fix, POST /tasks enqueued :PLANNING directly, so the bootstrap
+    job re-enqueued advance:<id>:PLANNING while that very job was still
+    running, arq deduped it (returns None), and the task stranded at PLANNING
+    with no continuation job."""
+    tid = uuid.uuid4()
+
+    # The bootstrap hop POST enqueues (target = the task's CURRENT status).
+    bootstrap_id = advance_job_id(tid, "CREATED")
+    assert bootstrap_id == f"advance:{tid}:CREATED"
+
+    # The self-chain re-enqueues the NEXT stage under its own distinct id.
+    planning_stage_id = advance_job_id(tid, "PLANNING")
+    assert planning_stage_id == f"advance:{tid}:PLANNING"
+
+    # They must never be the same id: identical would self-dedupe and strand
+    # the task (the bug this test guards against).
+    assert bootstrap_id != planning_stage_id
+
+    # And the sweeps share the bootstrap id, so POST + sweep racers collapse.
+    assert advance_job_id(tid, "CREATED") == bootstrap_id

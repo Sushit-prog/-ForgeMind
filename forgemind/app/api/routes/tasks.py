@@ -117,8 +117,18 @@ async def create_task(payload: TaskCreate, db: Session = Depends(get_db)) -> Tas
     # Hand off to the worker — the API never drives transitions synchronously.
     # If the queue is unavailable the task stays CREATED and the worker's
     # startup sweep picks it up later.
+    #
+    # The bootstrap hop runs under the task's CURRENT status (CREATED), NOT
+    # "PLANNING": its id (advance:<id>:CREATED) is what the startup sweep and
+    # the stale-CREATED sweep also target, so racers collapse to one job (the
+    # dedupe Fix). And it lets the worker's self-chain re-enqueue the PLANNING
+    # stage under a DIFFERENT id (advance:<id>:PLANNING) after committing
+    # CREATED -> PLANNING. If we enqueued "PLANNING" here, the bootstrap job
+    # would re-enqueue advance:<id>:PLANNING while that very job is still
+    # running, arq would dedupe it (job_key survives until finish), and the
+    # task would strand at PLANNING with no continuation job.
     try:
-        await enqueue_advance_task(task.id, target_status="PLANNING")
+        await enqueue_advance_task(task.id, target_status=task.status)
     except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to enqueue advance_task for %s — will be swept later", task.id
