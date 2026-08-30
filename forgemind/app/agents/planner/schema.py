@@ -18,7 +18,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-StepType = Literal["research", "implement", "test", "debug", "review", "security", "github"]
+StepType = Literal[
+    "research", "implement", "test", "debug", "review", "security", "github"
+]
 
 
 class PlanStep(BaseModel):

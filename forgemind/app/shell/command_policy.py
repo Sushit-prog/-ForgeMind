@@ -33,7 +33,9 @@ import shlex
 
 # Exact binary match — the first token must be one of these, nothing else
 # (no ./pytest, no pytest2, no wrapper scripts).
-ALLOWED_BINARIES = frozenset({"pytest", "npm", "ruff", "mypy", "eslint", "tsc", "go", "cargo"})
+ALLOWED_BINARIES = frozenset(
+    {"pytest", "npm", "ruff", "mypy", "eslint", "tsc", "go", "cargo"}
+)
 
 # Binaries whose arguments are validated individually (flags/paths allowed,
 # metacharacters and escapes rejected).

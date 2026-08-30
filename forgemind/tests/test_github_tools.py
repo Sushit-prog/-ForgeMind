@@ -14,12 +14,11 @@ from app.execution.tool_pipeline import ToolInputValidationError, ToolPipeline
 from app.github.errors import GitHubConfigError
 from app.github.stub import StubGitHubClient
 from app.git.runner import run_git
-from app.models import Repository, Task, ToolCall, Worktree
+from app.models import Repository, ToolCall, Worktree
 from app.tools.base import ExecutionContext
 from app.tools.github_tools import (
     CreatePrInput,
     GitHubCreatePrTool,
-    GitHubGetIssueTool,
     GITHUB_TOOLS,
 )
 from app.tools.git_tools import PushInput, PushTool
@@ -49,7 +48,6 @@ def make_worktree_with_commit(
     """A real worktree with one committed change, ready to push."""
     from pathlib import Path
 
-    from app.git.operations import GitOperations
     from app.git.worktree_manager import WorktreeManager
 
     wt = WorktreeManager(db_session).create(task_id, repo)

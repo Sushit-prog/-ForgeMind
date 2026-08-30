@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, JsonType, utcnow
@@ -24,11 +24,18 @@ class AuditLog(Base):
     task_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
     )
-    actor: Mapped[str] = mapped_column(String(128), nullable=False)  # e.g. "api", agent name
-    action: Mapped[str] = mapped_column(String(128), nullable=False)  # e.g. "task.created"
+    actor: Mapped[str] = mapped_column(
+        String(128), nullable=False
+    )  # e.g. "api", agent name
+    action: Mapped[str] = mapped_column(
+        String(128), nullable=False
+    )  # e.g. "task.created"
     entity_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     details: Mapped[dict | None] = mapped_column(JsonType, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

@@ -14,7 +14,6 @@ from __future__ import annotations
 import importlib
 import uuid
 
-import pytest
 
 from app.config import get_settings
 from app.models import ExecutionEvent, TaskStatus

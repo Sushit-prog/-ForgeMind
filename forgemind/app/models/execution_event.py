@@ -18,9 +18,7 @@ from app.models.base import Base, utcnow
 
 class ExecutionEvent(Base):
     __tablename__ = "execution_events"
-    __table_args__ = (
-        Index("ix_execution_events_task_id", "task_id"),
-    )
+    __table_args__ = (Index("ix_execution_events_task_id", "task_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(
@@ -30,5 +28,8 @@ class ExecutionEvent(Base):
     to_status: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

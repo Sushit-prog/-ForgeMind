@@ -36,5 +36,7 @@ def setup_logging() -> None:
     # Alembic logs at INFO by default; keep noise down unless configured.
     logging.getLogger("alembic").setLevel(settings.log_level.upper())
     logging.getLogger("sqlalchemy.engine").setLevel(
-        "WARNING" if settings.environment != "development" else settings.log_level.upper()
+        "WARNING"
+        if settings.environment != "development"
+        else settings.log_level.upper()
     )

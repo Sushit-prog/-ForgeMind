@@ -13,8 +13,6 @@ from app.models import (
     Task,
     TestRun,
 )
-from app.runtime.task_lifecycle import transition_task
-from app.runtime.state_machine import TaskStatus
 
 
 def make_task(db_session, repo_task) -> Task:

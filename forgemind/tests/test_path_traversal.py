@@ -8,7 +8,6 @@ message or result).
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -45,6 +44,7 @@ def try_symlink(target: Path, link: Path) -> bool:
 
 
 # --- lexical attacks --------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "attempt",
@@ -96,6 +96,7 @@ def test_read_does_not_happen_on_traversal(worktree) -> None:
 
 
 # --- symlink attacks --------------------------------------------------------
+
 
 def test_symlink_file_escape_rejected(worktree) -> None:
     outside_secret = worktree.parent / "secrets.env"
@@ -198,6 +199,7 @@ def test_symlink_inside_root_write_is_allowed(worktree) -> None:
 
 
 # --- benign behavior --------------------------------------------------------
+
 
 def test_benign_reads_work(worktree) -> None:
     access = FileAccess(worktree)

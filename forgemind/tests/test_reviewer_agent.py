@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from pathlib import Path
 
 import pytest
@@ -29,7 +28,7 @@ from app.llm import StubLLMProvider
 from app.llm.mock import FINAL_PROPOSAL
 from app.models import AuditLog
 from app.models import ImplementationSummary, Repository, ReviewResult as ReviewRow
-from app.models import Task, TestRun
+from app.models import Task
 from app.tools.base import ExecutionContext
 
 
@@ -52,7 +51,6 @@ def make_commit_repo(tmp_path, *, app_content: str) -> Path:
 
 def repo_task_worktree_with_commit(db_session, repo_path: Path, app_content: str):
     """Task + worktree + ONE developer commit. Returns the commit sha."""
-    from app.models import Repository
 
     repo = Repository(url=str(repo_path), default_branch="main")
     db_session.add(repo)
@@ -83,9 +81,9 @@ def diff_proposal(sha: str) -> str:
     """Propose git.diff for the REAL commit sha under review — the mock's
     canned proposal can't know the sha, so tests build it dynamically."""
     return json.dumps({"tool_call": {"tool": "git.diff", "input": {"commit": sha}}})
-APPROVE_RESPONSE = json.dumps(
-    {"decision": "APPROVE", "issues": [], "severity": "low"}
-)
+
+
+APPROVE_RESPONSE = json.dumps({"decision": "APPROVE", "issues": [], "severity": "low"})
 REJECT_RESPONSE = json.dumps(
     {
         "decision": "REQUEST_CHANGES",
@@ -109,11 +107,15 @@ def test_review_result_schema_validation() -> None:
     approve = ReviewResult(decision="APPROVE", issues=[], severity="low")
     assert approve.decision == "APPROVE"
     with pytest.raises(ValidationError):
-        ReviewResult(decision="APPROVE", issues=[ReviewIssue(
-            description="x", severity="low", file="f", line=1
-        )], severity="low")  # APPROVE with issues is invalid
+        ReviewResult(
+            decision="APPROVE",
+            issues=[ReviewIssue(description="x", severity="low", file="f", line=1)],
+            severity="low",
+        )  # APPROVE with issues is invalid
     with pytest.raises(ValidationError):
-        ReviewResult(decision="REJECT", issues=[], severity="high")  # REJECT needs issues
+        ReviewResult(
+            decision="REJECT", issues=[], severity="high"
+        )  # REJECT needs issues
     # line must be >= 1 (or absent), never 0.
     with pytest.raises(ValidationError):
         ReviewResult(
@@ -141,9 +143,12 @@ def test_reviewer_approves_clean_diff(db_session, tmp_path) -> None:
     )
 
     result = run(
-        reviewer.run(task, sha, fake_test_result(), ExecutionContext(
-            task_id=task.id, agent_type="reviewer", db=db_session
-        ))
+        reviewer.run(
+            task,
+            sha,
+            fake_test_result(),
+            ExecutionContext(task_id=task.id, agent_type="reviewer", db=db_session),
+        )
     )
 
     assert result.decision == "APPROVE"
@@ -173,9 +178,12 @@ def test_reviewer_rejects_bad_diff(db_session, tmp_path) -> None:
     )
 
     result = run(
-        reviewer.run(task, sha, fake_test_result(), ExecutionContext(
-            task_id=task.id, agent_type="reviewer", db=db_session
-        ))
+        reviewer.run(
+            task,
+            sha,
+            fake_test_result(),
+            ExecutionContext(task_id=task.id, agent_type="reviewer", db=db_session),
+        )
     )
 
     assert result.decision == "REQUEST_CHANGES"
@@ -235,7 +243,8 @@ def test_reviewer_is_blind_to_developer_summary(db_session, tmp_path) -> None:
     # Proof of structural blindness: the summary text and its deviations
     # appear in NONE of the messages sent to the LLM.
     all_text = "\n".join(
-        m.content for msgs in provider.structured_calls + provider.generate_calls
+        m.content
+        for msgs in provider.structured_calls + provider.generate_calls
         for m in msgs
     )
     assert "perfect" not in all_text
@@ -273,9 +282,12 @@ def test_reviewer_write_proposal_denied_and_audited(db_session, tmp_path) -> Non
     )
 
     result = run(
-        reviewer.run(task, sha, fake_test_result(), ExecutionContext(
-            task_id=task.id, agent_type="reviewer", db=db_session
-        ))
+        reviewer.run(
+            task,
+            sha,
+            fake_test_result(),
+            ExecutionContext(task_id=task.id, agent_type="reviewer", db=db_session),
+        )
     )
 
     assert result.decision == "APPROVE"

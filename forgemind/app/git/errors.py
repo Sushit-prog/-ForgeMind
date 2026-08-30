@@ -27,7 +27,9 @@ class DirtyWorktreeError(GitOperationError):
 class WorktreeNotFoundError(LookupError):
     """The worktree row is missing, not active, or its directory is gone."""
 
-    def __init__(self, worktree_id: uuid.UUID | None = None, *, detail: str = "") -> None:
+    def __init__(
+        self, worktree_id: uuid.UUID | None = None, *, detail: str = ""
+    ) -> None:
         self.worktree_id = worktree_id
         self.detail = detail
         message = detail or f"worktree not found: {worktree_id}"

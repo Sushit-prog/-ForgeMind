@@ -37,9 +37,7 @@ class ToolCallStatus(str, enum.Enum):
 
 class ToolCall(Base):
     __tablename__ = "tool_calls"
-    __table_args__ = (
-        Index("ix_tool_calls_task_id", "task_id"),
-    )
+    __table_args__ = (Index("ix_tool_calls_task_id", "task_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     # Nullable so calls outside a task context still audit (the one-row
@@ -59,5 +57,8 @@ class ToolCall(Base):
     risk: Mapped[str] = mapped_column(String(16), nullable=False)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

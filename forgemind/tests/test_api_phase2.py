@@ -92,7 +92,10 @@ def test_events_endpoint_returns_ordered_trail(client, db_session) -> None:
     assert [e["to_status"] for e in events] == [s.value for s in AUTO_PIPELINE[1:]]
     # Oldest first, each consecutive pair a legal transition.
     for e in events:
-        assert TaskStatus(e["to_status"]) in LEGAL_TRANSITIONS[TaskStatus(e["from_status"])]
+        assert (
+            TaskStatus(e["to_status"])
+            in LEGAL_TRANSITIONS[TaskStatus(e["from_status"])]
+        )
     assert events[-1]["to_status"] == "COMPLETED"
 
 

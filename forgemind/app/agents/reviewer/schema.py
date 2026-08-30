@@ -34,7 +34,5 @@ class ReviewResult(BaseModel):
             if self.issues:
                 raise ValueError("APPROVE must carry no issues")
         elif not self.issues:
-            raise ValueError(
-                f"{self.decision} must carry at least one issue"
-            )
+            raise ValueError(f"{self.decision} must carry at least one issue")
         return self

@@ -42,8 +42,14 @@ class RepositoryDiscovery:
         return clone_path
 
     def _ensure_clone(self, repository: Repository) -> Path:
-        cached = Path(repository.local_clone_path) if repository.local_clone_path else None
-        if cached is not None and cached.is_dir() and run_git_ok(cached, "rev-parse", "--git-dir"):
+        cached = (
+            Path(repository.local_clone_path) if repository.local_clone_path else None
+        )
+        if (
+            cached is not None
+            and cached.is_dir()
+            and run_git_ok(cached, "rev-parse", "--git-dir")
+        ):
             return cached
 
         clone_path = self.cache_dir / "clones" / str(repository.id)
@@ -66,14 +72,22 @@ class RepositoryDiscovery:
 
         # Argument list only — the URL is a single argument, never shell.
         try:
-            run_git(self.cache_dir, "clone", "--no-checkout", repository.url, str(clone_path))
+            run_git(
+                self.cache_dir,
+                "clone",
+                "--no-checkout",
+                repository.url,
+                str(clone_path),
+            )
         except GitOperationError as exc:
             # A concurrent worker may have won the clone race: if the path
             # now exists as a valid git dir, reuse it instead of failing
             # (research can legitimately run twice on one task — Section D
             # concurrency). Anything else is a real clone failure.
             if clone_path.exists() and run_git_ok(clone_path, "rev-parse", "--git-dir"):
-                logger.info("Clone race for %s — reusing concurrent clone", repository.url)
+                logger.info(
+                    "Clone race for %s — reusing concurrent clone", repository.url
+                )
             else:
                 if clone_path.exists():
                     shutil.rmtree(clone_path, ignore_errors=True)
@@ -176,7 +190,9 @@ def detect_test_command(clone_path: Path) -> str | None:
     fails with a clear "not configured" message at invocation).
     """
     try:
-        listed = run_git(clone_path, "ls-tree", "--name-only", "HEAD").stdout.splitlines()
+        listed = run_git(
+            clone_path, "ls-tree", "--name-only", "HEAD"
+        ).stdout.splitlines()
     except GitOperationError:
         logger.warning("test-command detection: cannot list tree of %s", clone_path)
         return None

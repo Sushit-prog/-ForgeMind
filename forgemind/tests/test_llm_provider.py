@@ -67,6 +67,7 @@ def test_unknown_step_type_raises() -> None:
 
 # --- stub provider ----------------------------------------------------------
 
+
 def test_stub_structured_output_returns_valid_plan() -> None:
     import asyncio
 
@@ -102,6 +103,7 @@ def test_stub_generate_returns_raw_string() -> None:
 
 # --- transient classification ----------------------------------------------
 
+
 def test_is_transient_error_classification() -> None:
     assert is_transient_error(LLMTimeoutError("slow"))
     assert is_transient_error(LLMProviderError(429, "rate limited"))
@@ -118,7 +120,6 @@ import logging
 
 import app.llm.openai_compat as compat_module
 from app.llm.openai_compat import OpenAICompatibleProvider
-from app.llm.openrouter import OpenRouterProvider  # shim alias still works
 from app.llm.provider import Message
 
 
@@ -167,7 +168,10 @@ def test_null_content_raises_transient_503_with_diagnostics(
         "id": "resp-1",
         "model": "cohere/north-mini-code:free",
         "choices": [
-            {"message": {"role": "assistant", "content": None}, "finish_reason": "length"}
+            {
+                "message": {"role": "assistant", "content": None},
+                "finish_reason": "length",
+            }
         ],
         "usage": {"completion_tokens": 410},
     }
@@ -196,9 +200,7 @@ def test_missing_message_is_unexpected_shape_not_crash(monkeypatch) -> None:
     assert "unexpected response shape" in str(exc_info.value)
 
 
-def test_no_choices_error_envelope_raises_transient_503(
-    monkeypatch, caplog
-) -> None:
+def test_no_choices_error_envelope_raises_transient_503(monkeypatch, caplog) -> None:
     """Run #6 finding: after all upstream providers fail, OpenRouter answers
     HTTP 200 with an error envelope and NO choices key — which used to wrap
     as non-transient 'unexpected response shape' and blocked hops deeper in

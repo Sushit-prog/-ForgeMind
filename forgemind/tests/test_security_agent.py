@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from pathlib import Path
 
 import pytest
@@ -51,7 +50,6 @@ def make_commit_repo(tmp_path, *, app_content: str) -> Path:
 
 
 def repo_task_worktree_with_commit(db_session, repo_path: Path, app_content: str):
-    from app.models import Repository
 
     repo = Repository(url=str(repo_path), default_branch="main")
     db_session.add(repo)
@@ -149,16 +147,32 @@ def test_security_result_schema_validation() -> None:
     ok = SecurityResult(decision="PASS", findings=[])
     assert ok.decision == "PASS"
     with pytest.raises(ValidationError):
-        SecurityResult(decision="PASS", findings=[SecurityFinding(
-            category="SECRETS", file="f", line=1,
-            description="d", severity="high",
-        )])  # PASS with findings is invalid
+        SecurityResult(
+            decision="PASS",
+            findings=[
+                SecurityFinding(
+                    category="SECRETS",
+                    file="f",
+                    line=1,
+                    description="d",
+                    severity="high",
+                )
+            ],
+        )  # PASS with findings is invalid
     with pytest.raises(ValidationError):
         SecurityResult(decision="FAIL", findings=[])  # FAIL needs findings
     with pytest.raises(ValidationError):
-        SecurityResult(decision="FAIL", findings=[SecurityFinding(
-            category="BOGUS", file="f", description="d", severity="low",
-        )])  # unknown category
+        SecurityResult(
+            decision="FAIL",
+            findings=[
+                SecurityFinding(
+                    category="BOGUS",
+                    file="f",
+                    description="d",
+                    severity="low",
+                )
+            ],
+        )  # unknown category
 
 
 # --- integration: PASS on a clean diff -------------------------------------
@@ -177,9 +191,11 @@ def test_security_passes_clean_diff(db_session, tmp_path) -> None:
     )
 
     result = run(
-        agent.run(task, sha, ExecutionContext(
-            task_id=task.id, agent_type="security", db=db_session
-        ))
+        agent.run(
+            task,
+            sha,
+            ExecutionContext(task_id=task.id, agent_type="security", db=db_session),
+        )
     )
 
     assert result.decision == "PASS"
@@ -211,23 +227,30 @@ def test_security_fails_on_planted_checklist_examples(db_session, tmp_path) -> N
     agent = SecurityAgent(provider)
 
     result = run(
-        agent.run(task, sha, ExecutionContext(
-            task_id=task.id, agent_type="security", db=db_session
-        ))
+        agent.run(
+            task,
+            sha,
+            ExecutionContext(task_id=task.id, agent_type="security", db=db_session),
+        )
     )
 
     assert result.decision == "FAIL"
     # Every checklist category is represented in the findings.
     categories = {f.category for f in result.findings}
     for expected in (
-        "INJECTION", "SECRETS", "UNSAFE_SUBPROCESS",
-        "UNSAFE_NETWORK", "PATH_TRAVERSAL", "AUTH_AUTHZ",
+        "INJECTION",
+        "SECRETS",
+        "UNSAFE_SUBPROCESS",
+        "UNSAFE_NETWORK",
+        "PATH_TRAVERSAL",
+        "AUTH_AUTHZ",
     ):
         assert expected in categories, f"missing finding category {expected}"
 
     # The diff the agent actually saw contained the planted examples.
     all_text = "\n".join(
-        m.content for msgs in provider.structured_calls + provider.generate_calls
+        m.content
+        for msgs in provider.structured_calls + provider.generate_calls
         for m in msgs
     )
     assert "sk-live-1234567890abcdef" in all_text
@@ -275,14 +298,17 @@ def test_security_is_blind_to_review_result(db_session, tmp_path) -> None:
     )
     agent = SecurityAgent(provider)
     result = run(
-        agent.run(task, sha, ExecutionContext(
-            task_id=task.id, agent_type="security", db=db_session
-        ))
+        agent.run(
+            task,
+            sha,
+            ExecutionContext(task_id=task.id, agent_type="security", db=db_session),
+        )
     )
 
     assert result.decision == "FAIL"  # the planted diff fails regardless
     all_text = "\n".join(
-        m.content for msgs in provider.structured_calls + provider.generate_calls
+        m.content
+        for msgs in provider.structured_calls + provider.generate_calls
         for m in msgs
     )
     # The ReviewResult's VERDICT data is absent (the word "reviewer" appears
@@ -319,9 +345,11 @@ def test_security_write_proposal_denied_and_audited(db_session, tmp_path) -> Non
     )
 
     result = run(
-        agent.run(task, sha, ExecutionContext(
-            task_id=task.id, agent_type="security", db=db_session
-        ))
+        agent.run(
+            task,
+            sha,
+            ExecutionContext(task_id=task.id, agent_type="security", db=db_session),
+        )
     )
 
     assert result.decision == "PASS"

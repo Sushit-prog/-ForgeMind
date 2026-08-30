@@ -115,10 +115,17 @@ class Observation(BaseModel):
 
 class DeveloperAgent(Agent):
     name: ClassVar[str] = "developer"
-    description: ClassVar[str] = "Implements a plan step and commits it on the isolated worktree."
+    description: ClassVar[str] = (
+        "Implements a plan step and commits it on the isolated worktree."
+    )
     # Write-capable, but structurally bounded: no shell.*, no github.* —
     # build/test verification is a later phase's job, not Developer's.
-    capabilities: ClassVar[list[str]] = ["repo.read", "repo.write", "git.read", "git.write"]
+    capabilities: ClassVar[list[str]] = [
+        "repo.read",
+        "repo.write",
+        "git.read",
+        "git.write",
+    ]
 
     def __init__(
         self,
@@ -131,7 +138,9 @@ class DeveloperAgent(Agent):
         self.provider = provider
         settings = get_settings()
         self.max_tool_calls = (
-            settings.max_developer_tool_calls if max_tool_calls is None else max_tool_calls
+            settings.max_developer_tool_calls
+            if max_tool_calls is None
+            else max_tool_calls
         )
         self.timeout_retries = (
             settings.llm_max_retries if timeout_retries is None else timeout_retries
@@ -195,8 +204,15 @@ class DeveloperAgent(Agent):
                         db, task, plan_step, worktree.id, "no_commit_before_final"
                     )
                 return await self._synthesize(
-                    db, task, plan_step, worktree.id, research,
-                    messages, observations, commit_sha, forced=False,
+                    db,
+                    task,
+                    plan_step,
+                    worktree.id,
+                    research,
+                    messages,
+                    observations,
+                    commit_sha,
+                    forced=False,
                 )
 
             obs = await self._execute_tool(
@@ -213,7 +229,9 @@ class DeveloperAgent(Agent):
         # with no commit is not a degraded artifact, it is nothing.
         logger.warning(
             "Developer tool budget (%d) exhausted for task %s (committed=%s) — %s",
-            self.max_tool_calls, task.id, committed,
+            self.max_tool_calls,
+            task.id,
+            committed,
             "forcing synthesis" if committed else "hard failure (no commit)",
         )
         db.add(
@@ -228,10 +246,19 @@ class DeveloperAgent(Agent):
         )
         db.commit()
         if not committed:
-            self._fail_no_commit(db, task, plan_step, worktree.id, "no_commit_budget_exhausted")
+            self._fail_no_commit(
+                db, task, plan_step, worktree.id, "no_commit_budget_exhausted"
+            )
         return await self._synthesize(
-            db, task, plan_step, worktree.id, research,
-            messages, observations, commit_sha, forced=True,
+            db,
+            task,
+            plan_step,
+            worktree.id,
+            research,
+            messages,
+            observations,
+            commit_sha,
+            forced=True,
         )
 
     # -- internals -----------------------------------------------------------
@@ -268,7 +295,9 @@ class DeveloperAgent(Agent):
                 '{"final": true}.'
             )
             self._audit(
-                db, task_id, "developer.post_commit_proposal",
+                db,
+                task_id,
+                "developer.post_commit_proposal",
                 {"tool": call.tool, "denial_reason": reason},
             )
             return Observation(
@@ -287,7 +316,9 @@ class DeveloperAgent(Agent):
             # unknown tool as a benign probe; here it is not.
             logger.warning("Developer proposed unknown tool %s: %s", call.tool, exc)
             self._audit(
-                db, task_id, "developer.unexpected_denial",
+                db,
+                task_id,
+                "developer.unexpected_denial",
                 {"tool": call.tool, "surfaced_as": "unknown_tool", "error": str(exc)},
             )
             return Observation(
@@ -304,10 +335,14 @@ class DeveloperAgent(Agent):
             # every capability it legitimately needs, so a denial is
             # UNEXPECTED — audited distinctly from Research's expected case.
             logger.warning(
-                "Developer tool %s unexpectedly denied: %s", call.tool, result.denial_reason
+                "Developer tool %s unexpectedly denied: %s",
+                call.tool,
+                result.denial_reason,
             )
             self._audit(
-                db, task_id, "developer.unexpected_denial",
+                db,
+                task_id,
+                "developer.unexpected_denial",
                 {
                     "tool": call.tool,
                     "surfaced_as": "denied",
@@ -389,12 +424,14 @@ class DeveloperAgent(Agent):
         last: ImplementationSummaryDraft | None = None
         for _ in range(2):  # one correction retry
             try:
-                draft: ImplementationSummaryDraft = await structured_output_with_retries(
-                    self.provider,
-                    synth,
-                    ImplementationSummaryDraft,
-                    timeout_retries=self.timeout_retries,
-                    backoff_base_seconds=self.backoff_base,
+                draft: ImplementationSummaryDraft = (
+                    await structured_output_with_retries(
+                        self.provider,
+                        synth,
+                        ImplementationSummaryDraft,
+                        timeout_retries=self.timeout_retries,
+                        backoff_base_seconds=self.backoff_base,
+                    )
                 )
             except LLMMalformedOutputError as exc:
                 synth = build_summary_correction(synth, str(exc))
@@ -402,13 +439,19 @@ class DeveloperAgent(Agent):
 
             last = draft
             mismatch = files_changed_mismatch(draft, written)
-            unexplained = bool(deviations) and not (draft.deviations_from_research or "").strip()
+            unexplained = (
+                bool(deviations) and not (draft.deviations_from_research or "").strip()
+            )
             if not mismatch and not unexplained:
-                summary = ImplementationSummary(commit_sha=commit_sha, **draft.model_dump())
+                summary = ImplementationSummary(
+                    commit_sha=commit_sha, **draft.model_dump()
+                )
                 self._persist(db, task, plan_step, worktree_id, summary)
                 logger.info(
                     "Implementation summary persisted for task %s (commit %s, %d files)",
-                    task.id, commit_sha, len(summary.files_changed),
+                    task.id,
+                    commit_sha,
+                    len(summary.files_changed),
                 )
                 return summary
 
@@ -434,7 +477,8 @@ class DeveloperAgent(Agent):
         if mismatch:
             logger.error(
                 "Implementation summary accepted WITH unverified files_changed for task %s: %s",
-                task.id, mismatch,
+                task.id,
+                mismatch,
             )
             db.add(
                 AuditLog(
@@ -446,11 +490,14 @@ class DeveloperAgent(Agent):
                     details={"mismatch": mismatch},
                 )
             )
-        unexplained = bool(deviations) and not (last.deviations_from_research or "").strip()
+        unexplained = (
+            bool(deviations) and not (last.deviations_from_research or "").strip()
+        )
         if unexplained:
             logger.error(
                 "Implementation summary accepted WITHOUT explaining deviations for task %s: %s",
-                task.id, deviations,
+                task.id,
+                deviations,
             )
             db.add(
                 AuditLog(
@@ -469,7 +516,12 @@ class DeveloperAgent(Agent):
         return summary
 
     def _persist(
-        self, db, task: Task, plan_step, worktree_id: uuid.UUID, summary: ImplementationSummary
+        self,
+        db,
+        task: Task,
+        plan_step,
+        worktree_id: uuid.UUID,
+        summary: ImplementationSummary,
     ) -> None:
         db.add(
             ImplementationSummaryRow(

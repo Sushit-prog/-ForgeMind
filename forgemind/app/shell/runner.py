@@ -43,7 +43,9 @@ class CommandResult:
 class CommandRunner:
     """Run the repository's validated test command inside a worktree."""
 
-    def __init__(self, worktree_path: Path, test_command: str, timeout_seconds: float) -> None:
+    def __init__(
+        self, worktree_path: Path, test_command: str, timeout_seconds: float
+    ) -> None:
         self.worktree_path = worktree_path
         self.test_command = test_command
         self.timeout_seconds = timeout_seconds

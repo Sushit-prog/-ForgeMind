@@ -39,7 +39,9 @@ class TestResult(BaseModel):
     exit_code: int | None = None
 
 
-def parse_test_run(*, exit_code: int | None, output: str, timed_out: bool) -> TestResult:
+def parse_test_run(
+    *, exit_code: int | None, output: str, timed_out: bool
+) -> TestResult:
     """Deterministic parse of a raw subprocess run into a TestResult.
 
     Section 41's principle applied most literally: exit code + a structured
@@ -72,7 +74,9 @@ def parse_test_run(*, exit_code: int | None, output: str, timed_out: bool) -> Te
     for line in output.splitlines():
         match = _FAILED_LINE_RE.match(line.strip())
         if match:
-            failures.append(FailureDetail(test=match.group(1), output=match.group(2)[:2000]))
+            failures.append(
+                FailureDetail(test=match.group(1), output=match.group(2)[:2000])
+            )
 
     counts = _counts(output)
     if counts["failed"] == 0 and counts["passed"] == 0 and not failures:

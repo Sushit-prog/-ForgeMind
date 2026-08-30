@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
 
 from app.models import (
     Approval,

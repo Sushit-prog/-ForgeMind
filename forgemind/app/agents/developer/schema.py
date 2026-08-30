@@ -74,7 +74,9 @@ def written_paths(observations: list) -> set[str]:
     return written
 
 
-def files_changed_mismatch(summary: ImplementationSummary, written: set[str]) -> list[str]:
+def files_changed_mismatch(
+    summary: ImplementationSummary, written: set[str]
+) -> list[str]:
     """Files the summary claims but never wrote, or wrote but never claimed.
 
     Returns the symmetric-difference, sorted. Empty = the summary is fully

@@ -16,7 +16,6 @@ from app.execution import (
     REDACTED,
     ToolInputValidationError,
     ToolPipeline,
-    ToolResult,
     make_execution_context,
     redact_sensitive,
 )
@@ -39,6 +38,7 @@ CTX = make_execution_context(agent_type="developer", task_id=uuid.uuid4())
 
 
 # --- test-only tools --------------------------------------------------------
+
 
 class _Input(BaseModel):
     value: str
@@ -107,10 +107,13 @@ def count_rows(db_session) -> int:
 
 
 def rows_for(db_session, tool_name: str) -> list[ToolCall]:
-    return list(db_session.scalars(select(ToolCall).where(ToolCall.tool_name == tool_name)))
+    return list(
+        db_session.scalars(select(ToolCall).where(ToolCall.tool_name == tool_name))
+    )
 
 
 # --- happy path -------------------------------------------------------------
+
 
 def test_echo_succeeds_with_one_executed_row(pipeline, db_session) -> None:
     result = run(pipeline.invoke("example.echo", {"message": "hi"}, set(), CTX))
@@ -132,10 +135,9 @@ def test_echo_succeeds_with_one_executed_row(pipeline, db_session) -> None:
 
 # --- capability enforcement -------------------------------------------------
 
+
 def test_read_file_denied_without_capability(pipeline, db_session) -> None:
-    result = run(
-        pipeline.invoke("example.read_file", {"path": "a/b.py"}, set(), CTX)
-    )
+    result = run(pipeline.invoke("example.read_file", {"path": "a/b.py"}, set(), CTX))
     assert result.status == "DENIED"
     assert "repo.read" in result.denial_reason
 
@@ -155,9 +157,7 @@ def test_read_file_denied_with_empty_capability_set(pipeline, db_session) -> Non
 
 def test_read_file_executes_with_capability(pipeline, db_session) -> None:
     result = run(
-        pipeline.invoke(
-            "example.read_file", {"path": "a/b.py"}, {"repo.read"}, CTX
-        )
+        pipeline.invoke("example.read_file", {"path": "a/b.py"}, {"repo.read"}, CTX)
     )
     assert result.status == "EXECUTED"
     assert result.output == {"path": "a/b.py", "size_bytes": 0}
@@ -166,10 +166,9 @@ def test_read_file_executes_with_capability(pipeline, db_session) -> None:
 
 # --- policy deny ------------------------------------------------------------
 
+
 def test_denied_tool_always_denied_by_policy(pipeline, db_session) -> None:
-    result = run(
-        pipeline.invoke("example.denied", {"command": "rm -rf /"}, set(), CTX)
-    )
+    result = run(pipeline.invoke("example.denied", {"command": "rm -rf /"}, set(), CTX))
     assert result.status == "DENIED"
     assert "explicitly denied" in result.denial_reason
 
@@ -180,6 +179,7 @@ def test_denied_tool_always_denied_by_policy(pipeline, db_session) -> None:
 
 
 # --- failure path -----------------------------------------------------------
+
 
 def test_raising_tool_records_failed_row(pipeline, db_session) -> None:
     pipeline.registry = registry_with(RaisingTool())
@@ -195,6 +195,7 @@ def test_raising_tool_records_failed_row(pipeline, db_session) -> None:
 
 
 # --- contract errors --------------------------------------------------------
+
 
 def test_unknown_tool_raises_not_found(pipeline, db_session) -> None:
     with pytest.raises(ToolNotFoundError):
@@ -221,6 +222,7 @@ def test_invalid_input_error_carries_tool_and_errors(pipeline) -> None:
 
 # --- exactly one row per invocation -----------------------------------------
 
+
 def test_every_invocation_writes_exactly_one_row(pipeline, db_session) -> None:
     pipeline.registry = registry_with(RaisingTool())
     outcomes = [
@@ -232,7 +234,12 @@ def test_every_invocation_writes_exactly_one_row(pipeline, db_session) -> None:
         run(pipeline.invoke("test.raises", {"value": "x"}, set(), CTX)),
     ]
     assert [r.status for r in outcomes] == [
-        "EXECUTED", "EXECUTED", "DENIED", "EXECUTED", "DENIED", "FAILED",
+        "EXECUTED",
+        "EXECUTED",
+        "DENIED",
+        "EXECUTED",
+        "DENIED",
+        "FAILED",
     ]
     assert count_rows(db_session) == len(outcomes)
     # Echo succeeded twice -> two rows, both EXECUTED.
@@ -240,6 +247,7 @@ def test_every_invocation_writes_exactly_one_row(pipeline, db_session) -> None:
 
 
 # --- redaction --------------------------------------------------------------
+
 
 def test_sensitive_input_and_output_redacted_in_row(pipeline, db_session) -> None:
     pipeline.registry = registry_with(TokenTool())
@@ -278,6 +286,7 @@ def test_redact_sensitive_nested() -> None:
 
 # --- pipeline metadata ------------------------------------------------------
 
+
 def test_row_carries_task_and_step_context(pipeline, db_session) -> None:
     task_id = uuid.uuid4()
     step_id = uuid.uuid4()
@@ -290,7 +299,11 @@ def test_row_carries_task_and_step_context(pipeline, db_session) -> None:
 
 
 def test_row_without_task_context_still_audits(pipeline, db_session) -> None:
-    run(pipeline.invoke("example.echo", {"message": "x"}, set(), make_execution_context()))
+    run(
+        pipeline.invoke(
+            "example.echo", {"message": "x"}, set(), make_execution_context()
+        )
+    )
     row = rows_for(db_session, "example.echo")[0]
     assert row.task_id is None
     assert row.agent_type is None

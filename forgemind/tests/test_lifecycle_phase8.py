@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from pathlib import Path
 
 from sqlalchemy import select
@@ -29,7 +28,6 @@ from app.agents.tester.agent import TestAgent
 from app.git.runner import run_git
 from app.llm import StubLLMProvider
 from app.llm.mock import (
-    DEFAULT_PLAN_RESPONSE,
     FINAL_PROPOSAL,
     RESEARCH_ARTIFACT_RESPONSE,
     SEARCH_PROPOSAL,
@@ -45,33 +43,48 @@ from app.runtime.task_lifecycle import advance_task_with_agents, transition_task
 # --- canned proposal fragments ----------------------------------------------
 
 WRITE_2 = json.dumps(
-    {"tool_call": {"tool": "filesystem.write_file",
-                   "input": {"path": "src/app.py", "content": "VALUE = 2\n"}}}
+    {
+        "tool_call": {
+            "tool": "filesystem.write_file",
+            "input": {"path": "src/app.py", "content": "VALUE = 2\n"},
+        }
+    }
 )
 WRITE_3 = json.dumps(
-    {"tool_call": {"tool": "filesystem.write_file",
-                   "input": {"path": "src/app.py", "content": "VALUE = 3\n"}}}
+    {
+        "tool_call": {
+            "tool": "filesystem.write_file",
+            "input": {"path": "src/app.py", "content": "VALUE = 3\n"},
+        }
+    }
 )
-COMMIT = json.dumps(
-    {"tool_call": {"tool": "git.commit", "input": {"message": "fix"}}}
-)
+COMMIT = json.dumps({"tool_call": {"tool": "git.commit", "input": {"message": "fix"}}})
 SUMMARY = json.dumps(
-    {"files_changed": ["src/app.py"], "summary": "updated VALUE",
-     "tests_added": [], "deviations_from_research": None}
+    {
+        "files_changed": ["src/app.py"],
+        "summary": "updated VALUE",
+        "tests_added": [],
+        "deviations_from_research": None,
+    }
 )
 READ_APP = json.dumps(
     {"tool_call": {"tool": "repository.read_file", "input": {"path": "src/app.py"}}}
 )
 CODE_FAILURE = json.dumps(
-    {"category": "CODE_FAILURE",
-     "root_cause": "VALUE does not match the test expectation.",
-     "fix_instruction": "Update src/app.py so VALUE equals 3.",
-     "fixable": True}
+    {
+        "category": "CODE_FAILURE",
+        "root_cause": "VALUE does not match the test expectation.",
+        "fix_instruction": "Update src/app.py so VALUE equals 3.",
+        "fixable": True,
+    }
 )
 ENV_FAILURE = json.dumps(
-    {"category": "ENVIRONMENT_FAILURE",
-     "root_cause": "integration services unreachable.",
-     "fix_instruction": None, "fixable": False}
+    {
+        "category": "ENVIRONMENT_FAILURE",
+        "root_cause": "integration services unreachable.",
+        "fix_instruction": None,
+        "fixable": False,
+    }
 )
 
 
@@ -149,9 +162,13 @@ def drive(db_session, task: Task, a) -> TaskStatus | None:
     planner, researcher, developer, debugger = a
     return run(
         advance_task_with_agents(
-            db_session, task.id,
-            planner=planner, researcher=researcher, developer=developer,
-            tester=TestAgent(), debugger=debugger,
+            db_session,
+            task.id,
+            planner=planner,
+            researcher=researcher,
+            developer=developer,
+            tester=TestAgent(),
+            debugger=debugger,
         )
     )
 
@@ -163,7 +180,9 @@ def test_testing_passed_routes_to_reviewing(db_session, tmp_path) -> None:
     task = make_task(db_session, repo)
     a = agents()
 
-    assert drive(db_session, task, a) is TaskStatus.PLANNING  # stub? no: PLANNING is real
+    assert (
+        drive(db_session, task, a) is TaskStatus.PLANNING
+    )  # stub? no: PLANNING is real
     db_session.expire_all()
     task = db_session.get(Task, task.id)
 
@@ -214,9 +233,7 @@ def test_testing_failed_routes_to_debugging(db_session, tmp_path) -> None:
             break
     assert status == TaskStatus.DEBUGGING
     # The failing run is persisted as a TestRun with status failed.
-    runs = db_session.scalars(
-        select(TestRun).where(TestRun.task_id == task.id)
-    ).all()
+    runs = db_session.scalars(select(TestRun).where(TestRun.task_id == task.id)).all()
     assert runs[-1].status == "failed"
 
 
@@ -228,7 +245,16 @@ def test_full_loop_fail_once_debug_then_pass(db_session, tmp_path) -> None:
     repo = make_repo(tmp_path, test_asserts="VALUE = 3")
     task = make_task(db_session, repo)
     # Developer: run 1 writes 2 (fails), run 2 writes 3 (passes).
-    a = agents(developer_queue=[WRITE_2, COMMIT, FINAL_PROPOSAL, WRITE_3, COMMIT, FINAL_PROPOSAL])
+    a = agents(
+        developer_queue=[
+            WRITE_2,
+            COMMIT,
+            FINAL_PROPOSAL,
+            WRITE_3,
+            COMMIT,
+            FINAL_PROPOSAL,
+        ]
+    )
 
     status = drive(db_session, task, a)  # CREATED -> PLANNING (stub)
     db_session.expire_all()
@@ -290,9 +316,7 @@ def test_full_loop_fail_once_debug_then_pass(db_session, tmp_path) -> None:
 
     # Two real test runs happened (the debugger's flakiness re-run failed the
     # same way — not flaky), then a passing run.
-    runs = db_session.scalars(
-        select(TestRun).where(TestRun.task_id == task.id)
-    ).all()
+    runs = db_session.scalars(select(TestRun).where(TestRun.task_id == task.id)).all()
     assert [r.status for r in runs] == ["failed", "failed", "passed"]
 
     # The classification was persisted with the concrete fix instruction.

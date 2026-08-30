@@ -28,7 +28,11 @@ def upgrade() -> None:
         sa.Column("commit_sha", sa.String(length=64), nullable=False),
         sa.Column("decision", sa.String(length=32), nullable=False),
         sa.Column("severity", sa.String(length=16), nullable=False),
-        sa.Column('issues', postgresql.JSONB(astext_type=sa.Text()).with_variant(sa.JSON(), 'sqlite'), nullable=False),
+        sa.Column(
+            "issues",
+            postgresql.JSONB(astext_type=sa.Text()).with_variant(sa.JSON(), "sqlite"),
+            nullable=False,
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -47,7 +51,11 @@ def upgrade() -> None:
         sa.Column("task_id", sa.Uuid(), nullable=False),
         sa.Column("commit_sha", sa.String(length=64), nullable=False),
         sa.Column("decision", sa.String(length=16), nullable=False),
-        sa.Column('findings', postgresql.JSONB(astext_type=sa.Text()).with_variant(sa.JSON(), 'sqlite'), nullable=False),
+        sa.Column(
+            "findings",
+            postgresql.JSONB(astext_type=sa.Text()).with_variant(sa.JSON(), "sqlite"),
+            nullable=False,
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

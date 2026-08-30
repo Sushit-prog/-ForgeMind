@@ -12,7 +12,6 @@ hallucinate and nothing for a prompt injection to redirect.
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import ClassVar
 
 from app.agents.base import Agent
@@ -58,12 +57,19 @@ class TestAgent(Agent):
             # errored, distinct from a clean failing exit code.
             logger.warning(
                 "shell.run_test not executed for task %s: %s (%s)",
-                task.id, result.status, result.error or result.denial_reason,
+                task.id,
+                result.status,
+                result.error or result.denial_reason,
             )
             parsed = TestResult(status="error", exit_code=None)
             self._persist(
-                db, task, worktree, parsed,
-                output=result.error or "", duration_ms=0, timed_out=False,
+                db,
+                task,
+                worktree,
+                parsed,
+                output=result.error or "",
+                duration_ms=0,
+                timed_out=False,
             )
             return parsed
 
@@ -83,7 +89,10 @@ class TestAgent(Agent):
         )
         logger.info(
             "Test run for task %s: %s (%d passed, %d failed, %dms)",
-            task.id, parsed.status, parsed.passed, parsed.failed,
+            task.id,
+            parsed.status,
+            parsed.passed,
+            parsed.failed,
             result.output["duration_ms"],
         )
         return parsed
@@ -113,7 +122,9 @@ class TestAgent(Agent):
         db.add(row)
         db.flush()
         for failure in result.failures:
-            db.add(Failure(test_run_id=row.id, test=failure.test, output=failure.output))
+            db.add(
+                Failure(test_run_id=row.id, test=failure.test, output=failure.output)
+            )
         db.commit()
 
 

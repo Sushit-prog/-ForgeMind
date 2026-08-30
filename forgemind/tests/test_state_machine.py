@@ -7,7 +7,6 @@ from app.runtime.state_machine import (
     IllegalTransitionError,
     LEGAL_TRANSITIONS,
     TERMINAL_STATES,
-    StateMachine,
     state_machine,
 )
 

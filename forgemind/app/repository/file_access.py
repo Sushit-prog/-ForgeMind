@@ -127,7 +127,9 @@ class FileAccess:
                 for lineno, line in enumerate(content.splitlines(), 1):
                     if needle in line.lower():
                         matches.append(
-                            SearchMatch(path=rel, line=lineno, snippet=line.strip()[:200])
+                            SearchMatch(
+                                path=rel, line=lineno, snippet=line.strip()[:200]
+                            )
                         )
                         if len(matches) >= MAX_SEARCH_RESULTS:
                             return matches

@@ -46,7 +46,9 @@ class WriteFileTool(Tool):
     capabilities: list[str] = ["repo.write"]
     risk = "MEDIUM"
 
-    async def execute(self, input: WriteFileInput, ctx: ExecutionContext) -> WriteFileOutput:
+    async def execute(
+        self, input: WriteFileInput, ctx: ExecutionContext
+    ) -> WriteFileOutput:
         if ctx.db is None:
             raise RuntimeError("ExecutionContext.db is required for filesystem tools")
         root = WorktreeManager(ctx.db).path_for(input.worktree_id)

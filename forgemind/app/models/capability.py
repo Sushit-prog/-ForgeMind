@@ -27,5 +27,8 @@ class Capability(Base):
     # Default risk for a tool gated on this capability; per-tool risk may differ.
     risk: Mapped[str] = mapped_column(String(16), nullable=False, default="MEDIUM")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

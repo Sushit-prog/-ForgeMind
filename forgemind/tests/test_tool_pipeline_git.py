@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 
 from app.execution import ToolPipeline, make_execution_context
 from app.git.worktree_manager import WorktreeManager
-from app.models import Repository, Task, ToolCall
+from app.models import ToolCall
 from app.tools import build_runtime_registry
 
 
@@ -29,9 +29,7 @@ def worktree_env(db_session, repo_task, tmp_path):
     repo, task = repo_task
     manager = WorktreeManager(db_session, cache_dir=tmp_path / "cache")
     wt = manager.create(task.id, repo)
-    ctx = make_execution_context(
-        task_id=task.id, agent_type="developer", db=db_session
-    )
+    ctx = make_execution_context(task_id=task.id, agent_type="developer", db=db_session)
     pipeline = ToolPipeline(db=db_session, registry=build_runtime_registry())
     return {
         "pipeline": pipeline,
@@ -53,6 +51,7 @@ def rows_for(db_session, tool_name: str) -> list[ToolCall]:
 
 
 # --- repository.read_file ---------------------------------------------------
+
 
 def test_read_file_denied_without_repo_read(worktree_env, db_session) -> None:
     result = run(
@@ -87,12 +86,17 @@ def test_read_file_executes_with_repo_read(worktree_env, db_session) -> None:
     assert rows[0].task_id == worktree_env["task_id"]
 
 
-def test_read_file_traversal_is_failed_call_not_a_read(worktree_env, db_session) -> None:
+def test_read_file_traversal_is_failed_call_not_a_read(
+    worktree_env, db_session
+) -> None:
     """../escaping input -> FAILED row; outside content never leaks."""
     result = run(
         worktree_env["pipeline"].invoke(
             "repository.read_file",
-            {"worktree_id": str(worktree_env["worktree_id"]), "path": "../../secrets.env"},
+            {
+                "worktree_id": str(worktree_env["worktree_id"]),
+                "path": "../../secrets.env",
+            },
             {"repo.read"},
             worktree_env["ctx"],
         )
@@ -135,6 +139,7 @@ def test_read_file_unknown_worktree_failed(worktree_env, db_session) -> None:
 
 # --- repository.search / list_files -----------------------------------------
 
+
 def test_search_executes(worktree_env, db_session) -> None:
     result = run(
         worktree_env["pipeline"].invoke(
@@ -162,6 +167,7 @@ def test_list_files_executes(worktree_env, db_session) -> None:
 
 
 # --- git.* tools ------------------------------------------------------------
+
 
 def test_git_status_requires_git_read(worktree_env, db_session) -> None:
     result = run(
@@ -267,7 +273,10 @@ def test_git_commit_empty_worktree_is_failed_call(worktree_env, db_session) -> N
     result = run(
         worktree_env["pipeline"].invoke(
             "git.commit",
-            {"worktree_id": str(worktree_env["worktree_id"]), "message": "nothing to do"},
+            {
+                "worktree_id": str(worktree_env["worktree_id"]),
+                "message": "nothing to do",
+            },
             {"git.write"},
             worktree_env["ctx"],
         )
@@ -279,6 +288,7 @@ def test_git_commit_empty_worktree_is_failed_call(worktree_env, db_session) -> N
 
 # --- audit guarantees -------------------------------------------------------
 
+
 def test_every_git_call_writes_exactly_one_row(worktree_env, db_session) -> None:
     invocations = [
         ("git.status", {"git.read"}),
@@ -289,7 +299,10 @@ def test_every_git_call_writes_exactly_one_row(worktree_env, db_session) -> None
     for tool, caps in invocations:
         result = run(
             worktree_env["pipeline"].invoke(
-                tool, {"worktree_id": str(worktree_env["worktree_id"])}, caps, worktree_env["ctx"]
+                tool,
+                {"worktree_id": str(worktree_env["worktree_id"])},
+                caps,
+                worktree_env["ctx"],
             )
         )
         assert result.status in ("EXECUTED", "DENIED")

@@ -19,7 +19,7 @@ from sqlalchemy import select
 from app.agents.debugger.agent import DebuggerAgent, DebuggerError
 from app.agents.debugger.schema import FailureClassification
 from app.agents.tester.agent import TestAgent
-from app.agents.tester.schema import TestResult, result_from_row
+from app.agents.tester.schema import TestResult
 from app.git.runner import run_git
 from app.git.worktree_manager import WorktreeManager
 from app.llm import StubLLMProvider
@@ -50,7 +50,6 @@ def make_repo(tmp_path, *, app_content: str, tests: str) -> Path:
 
 
 def repo_task_worktree(db_session, repo_path: Path):
-    from app.models import Repository
 
     repo = Repository(url=str(repo_path), default_branch="main")
     db_session.add(repo)
@@ -107,9 +106,7 @@ def test_classifies_code_failure_with_fix_instruction(db_session, tmp_path) -> N
     repo, task, worktree = repo_task_worktree(db_session, repo_path)
 
     # First run: a real failing suite (the run DEBUGGING responds to).
-    tester_ctx = ExecutionContext(
-        task_id=task.id, agent_type="tester", db=db_session
-    )
+    tester_ctx = ExecutionContext(task_id=task.id, agent_type="tester", db=db_session)
     first = run(TestAgent().run(task, worktree, tester_ctx))
     assert first.status == "failed"
 
@@ -120,9 +117,7 @@ def test_classifies_code_failure_with_fix_instruction(db_session, tmp_path) -> N
         }
     )
     ctx = ExecutionContext(task_id=task.id, agent_type="debugger", db=db_session)
-    classification = run(
-        debugger.run(task, first, fake_summary(task), ctx)
-    )
+    classification = run(debugger.run(task, first, fake_summary(task), ctx))
 
     assert isinstance(classification, FailureClassification)
     assert classification.category == "CODE_FAILURE"
@@ -140,9 +135,7 @@ def test_classifies_code_failure_with_fix_instruction(db_session, tmp_path) -> N
 
     # The re-run happened (2 TestRun rows total — the trace records both) and
     # the re-run's tool call is attributed to the TESTER.
-    runs = db_session.scalars(
-        select(TestRun).where(TestRun.task_id == task.id)
-    ).all()
+    runs = db_session.scalars(select(TestRun).where(TestRun.task_id == task.id)).all()
     assert len(runs) == 2
     assert runs[1].status == "failed"  # same failure mode -> not flaky
 
@@ -170,9 +163,7 @@ def test_read_only_boundary_denies_write_and_continues(db_session, tmp_path) -> 
         "    assert 'VALUE = 3' in Path('src/app.py').read_text()\n",
     )
     repo, task, worktree = repo_task_worktree(db_session, repo_path)
-    tester_ctx = ExecutionContext(
-        task_id=task.id, agent_type="tester", db=db_session
-    )
+    tester_ctx = ExecutionContext(task_id=task.id, agent_type="tester", db=db_session)
     first = run(TestAgent().run(task, worktree, tester_ctx))
 
     write_proposal = json.dumps(
@@ -217,9 +208,7 @@ def test_shell_proposal_denied_read_only_boundary(db_session, tmp_path) -> None:
         "    assert 'VALUE = 3' in Path('src/app.py').read_text()\n",
     )
     repo, task, worktree = repo_task_worktree(db_session, repo_path)
-    tester_ctx = ExecutionContext(
-        task_id=task.id, agent_type="tester", db=db_session
-    )
+    tester_ctx = ExecutionContext(task_id=task.id, agent_type="tester", db=db_session)
     first = run(TestAgent().run(task, worktree, tester_ctx))
 
     # A well-formed proposal (valid worktree_id) so the CAPABILITY gate is
@@ -266,9 +255,7 @@ def test_flaky_detected_via_rerun_not_guess(db_session, tmp_path) -> None:
         "        raise AssertionError('first run fails; re-run passes')\n",
     )
     repo, task, worktree = repo_task_worktree(db_session, repo_path)
-    tester_ctx = ExecutionContext(
-        task_id=task.id, agent_type="tester", db=db_session
-    )
+    tester_ctx = ExecutionContext(task_id=task.id, agent_type="tester", db=db_session)
     first = run(TestAgent().run(task, worktree, tester_ctx))
     assert first.status == "failed"
 
@@ -304,9 +291,7 @@ def test_flaky_detected_via_rerun_not_guess(db_session, tmp_path) -> None:
     # The provider was NEVER consulted for the flaky label — the re-run's
     # pass is observed ground truth, not an LLM guess (Section 10).
     assert debugger.provider.structured_calls == []
-    runs = db_session.scalars(
-        select(TestRun).where(TestRun.task_id == task.id)
-    ).all()
+    runs = db_session.scalars(select(TestRun).where(TestRun.task_id == task.id)).all()
     assert len(runs) == 2
     assert runs[1].status == "passed"
 
@@ -369,7 +354,11 @@ def test_malformed_classification_raises_after_retry(db_session, tmp_path) -> No
     )
     ctx = ExecutionContext(task_id=task.id, agent_type="debugger", db=db_session)
     try:
-        run(debugger.run(task, TestResult(status="failed", exit_code=1), fake_summary(task), ctx))
+        run(
+            debugger.run(
+                task, TestResult(status="failed", exit_code=1), fake_summary(task), ctx
+            )
+        )
     except DebuggerError:
         return
     raise AssertionError("schema-invalid classification must raise DebuggerError")
@@ -379,7 +368,6 @@ def test_more_informative_and_inconsistency_logic() -> None:
     """Pure logic: an error/timeout first run vs a clean failing re-run is a
     DIFFERENT failure mode, not flakiness — classify from the more
     informative run and note the inconsistency."""
-    db = None  # type: ignore[assignment] — these helpers don't touch the DB
     debugger = debugger_with({})
 
     class FakeRun:

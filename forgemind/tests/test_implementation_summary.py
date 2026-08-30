@@ -34,6 +34,7 @@ def draft(**overrides) -> ImplementationSummaryDraft:
 
 # --- schema validation ------------------------------------------------------
 
+
 def test_draft_valid() -> None:
     d = draft()
     assert d.files_changed == ["src/app.py"]
@@ -71,6 +72,7 @@ def test_deviations_from_research_optional() -> None:
 
 
 # --- files-changed cross-check ----------------------------------------------
+
 
 def test_normalize_path_handles_dots_and_backslashes() -> None:
     assert normalize_path("./src/app.py") == "src/app.py"

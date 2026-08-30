@@ -52,11 +52,16 @@ def rows_for(db_session, tool_name: str) -> list[ToolCall]:
 
 # --- capability gating -------------------------------------------------------
 
+
 def test_write_file_denied_without_repo_write(worktree_env, db_session) -> None:
     result = run(
         worktree_env["pipeline"].invoke(
             "filesystem.write_file",
-            {"worktree_id": str(worktree_env["worktree_id"]), "path": "src/app.py", "content": "x"},
+            {
+                "worktree_id": str(worktree_env["worktree_id"]),
+                "path": "src/app.py",
+                "content": "x",
+            },
             set(),
             worktree_env["ctx"],
         )
@@ -68,12 +73,18 @@ def test_write_file_denied_without_repo_write(worktree_env, db_session) -> None:
     assert rows[0].status == "DENIED"
 
 
-def test_write_file_denied_without_git_write_is_irrelevant(worktree_env, db_session) -> None:
+def test_write_file_denied_without_git_write_is_irrelevant(
+    worktree_env, db_session
+) -> None:
     """write_file needs repo.write only; git.write is not required."""
     result = run(
         worktree_env["pipeline"].invoke(
             "filesystem.write_file",
-            {"worktree_id": str(worktree_env["worktree_id"]), "path": "src/app.py", "content": "x"},
+            {
+                "worktree_id": str(worktree_env["worktree_id"]),
+                "path": "src/app.py",
+                "content": "x",
+            },
             {"repo.write"},
             worktree_env["ctx"],
         )
@@ -82,6 +93,7 @@ def test_write_file_denied_without_git_write_is_irrelevant(worktree_env, db_sess
 
 
 # --- happy path: modify existing + create new ---------------------------------
+
 
 def test_write_file_modifies_existing(worktree_env, db_session) -> None:
     result = run(
@@ -124,6 +136,7 @@ def test_write_file_creates_new_file_with_parents(worktree_env, db_session) -> N
 
 
 # --- security: the write-path traversal defense ------------------------------
+
 
 def test_write_path_traversal_rejected_and_nothing_written(
     worktree_env, db_session, tmp_path

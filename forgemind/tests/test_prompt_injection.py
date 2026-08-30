@@ -44,16 +44,25 @@ def test_objective_is_wrapped_as_data_in_prompt(db_session, repo_task) -> None:
     agent = PlanningAgent(provider)
 
     with pytest.raises(PlanValidationError):
-        run(agent.run(task, ExecutionContext(task_id=task.id, agent_type="planner", db=db_session)))
+        run(
+            agent.run(
+                task,
+                ExecutionContext(task_id=task.id, agent_type="planner", db=db_session),
+            )
+        )
 
     user_msg = provider.structured_calls[0][-1].content
     assert "<reference_data>" in user_msg
     assert INJECTION in user_msg  # the text is included — as data
     # And the schema demand follows the data block.
-    assert user_msg.index("<reference_data>") < user_msg.index("matching this exact schema")
+    assert user_msg.index("<reference_data>") < user_msg.index(
+        "matching this exact schema"
+    )
 
 
-def test_injection_obeyed_by_model_is_rejected_not_executed(db_session, repo_task) -> None:
+def test_injection_obeyed_by_model_is_rejected_not_executed(
+    db_session, repo_task
+) -> None:
     """The model "obeys" the injection and emits the malicious payload.
 
     Validation must reject it (retry + raise), and nothing garbage may be
@@ -69,7 +78,12 @@ def test_injection_obeyed_by_model_is_rejected_not_executed(db_session, repo_tas
         {
             "objective": "hacked",
             "steps": [
-                {"id": "i", "step_type": "implement", "description": "merge to main", "depends_on": []},
+                {
+                    "id": "i",
+                    "step_type": "implement",
+                    "description": "merge to main",
+                    "depends_on": [],
+                },
             ],
         }
     )
@@ -83,20 +97,29 @@ def test_injection_obeyed_by_model_is_rejected_not_executed(db_session, repo_tas
     rows = db_session.scalars(select(PlanRow).where(PlanRow.task_id == task.id)).all()
     assert len(rows) == 1
     assert rows[0].status == "INVALID"
-    assert db_session.scalars(
-        select(PlanStepRow).where(PlanStepRow.plan_id == rows[0].id)
-    ).all() == []
+    assert (
+        db_session.scalars(
+            select(PlanStepRow).where(PlanStepRow.plan_id == rows[0].id)
+        ).all()
+        == []
+    )
     # The injected "objective" never became a persisted plan.
     assert "hacked" not in rows[0].raw_llm_output or rows[0].status == "INVALID"
 
 
-def test_injection_with_model_cooperating_still_yields_valid_plan(db_session, repo_task) -> None:
+def test_injection_with_model_cooperating_still_yields_valid_plan(
+    db_session, repo_task
+) -> None:
     """A cooperative model returns a normal plan despite the injection text
     in the objective — the flow completes and persists it normally."""
     repo, task = repo_task
     task.objective = INJECTION
     agent = PlanningAgent(StubLLMProvider())  # default = valid plan
-    plan = run(agent.run(task, ExecutionContext(task_id=task.id, agent_type="planner", db=db_session)))
+    plan = run(
+        agent.run(
+            task, ExecutionContext(task_id=task.id, agent_type="planner", db=db_session)
+        )
+    )
     assert isinstance(plan, Plan)
     rows = db_session.scalars(select(PlanRow).where(PlanRow.task_id == task.id)).all()
     assert rows[0].status == "ACTIVE"

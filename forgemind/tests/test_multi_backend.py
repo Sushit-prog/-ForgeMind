@@ -61,9 +61,7 @@ def _patch_http(monkeypatch, *payloads) -> list[dict]:
             return False
 
         async def post(self, url, headers=None, json=None):
-            requests.append(
-                {"url": url, "headers": dict(headers or {}), "json": json}
-            )
+            requests.append({"url": url, "headers": dict(headers or {}), "json": json})
             return (
                 self._responses.pop(0)
                 if len(self._responses) > 1
@@ -102,9 +100,7 @@ def null_content():
 
 
 def no_choices_envelope():
-    return _FakeResponse(
-        {"error": {"message": "All providers failed", "code": 502}}
-    )
+    return _FakeResponse({"error": {"message": "All providers failed", "code": 502}})
 
 
 def rate_limited():

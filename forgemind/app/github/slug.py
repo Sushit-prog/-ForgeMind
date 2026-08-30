@@ -10,7 +10,6 @@ fall back to guessing).
 from __future__ import annotations
 
 import re
-from urllib.parse import urlsplit
 
 from app.github.errors import GitHubConfigError
 

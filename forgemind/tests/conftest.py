@@ -73,7 +73,6 @@ def db_session():
 @pytest.fixture()
 def source_repo(tmp_path):
     """A real throwaway git repo (Phase 4 git-runtime tests)."""
-    from pathlib import Path
 
     from app.git.runner import run_git
 

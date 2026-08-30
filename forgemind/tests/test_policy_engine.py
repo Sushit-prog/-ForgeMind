@@ -5,7 +5,6 @@ returns ALLOW or DENY deterministically — no I/O, no LLM, no free-text
 reasoning. Every rule here is exercised over typed inputs only.
 """
 
-import pytest
 from pydantic import BaseModel
 
 from app.policies.base import PolicyDecision, PolicyRule
@@ -22,7 +21,9 @@ class _Output(BaseModel):
     ok: bool = True
 
 
-def make_tool(tool_name: str, risk: str = "LOW", capabilities: list[str] | None = None) -> Tool:
+def make_tool(
+    tool_name: str, risk: str = "LOW", capabilities: list[str] | None = None
+) -> Tool:
     # Alias to distinct names: a class body can't read an enclosing function
     # local that it also assigns (``name = name`` is a NameError), but it CAN
     # read one it never assigns (``risk = _risk`` works fine).
@@ -53,6 +54,7 @@ class AllowAllRule(PolicyRule):
 
 
 # --- risk-default rule ------------------------------------------------------
+
 
 def test_risk_tier_denies_critical_unless_allowlisted() -> None:
     tool = make_tool("critical_tool", risk="CRITICAL")
@@ -87,6 +89,7 @@ def test_risk_tier_respects_custom_threshold() -> None:
 
 # --- explicit deny rule -----------------------------------------------------
 
+
 def test_explicit_deny_denies_listed_tool() -> None:
     tool = make_tool("banned")
     engine = PolicyEngine(rules=[ExplicitDenyRule(denied_tools={"banned"})])
@@ -102,6 +105,7 @@ def test_explicit_deny_abstains_for_other_tools() -> None:
 
 
 # --- engine: fail-closed, deny wins -----------------------------------------
+
 
 def test_deny_wins_over_allow_vote() -> None:
     """One rule ALLOW + one rule DENY must resolve to DENY (fail-closed)."""

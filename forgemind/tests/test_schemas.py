@@ -45,4 +45,6 @@ def test_missing_fields_rejected() -> None:
     with pytest.raises(ValidationError):
         TaskCreate(objective="Fix a bug")  # missing repository_url
     with pytest.raises(ValidationError):
-        TaskCreate(repository_url="https://github.com/org/repo.git")  # missing objective
+        TaskCreate(
+            repository_url="https://github.com/org/repo.git"
+        )  # missing objective

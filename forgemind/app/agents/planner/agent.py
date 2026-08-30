@@ -19,7 +19,6 @@ Retry policy (the seam the milestone calls out):
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -241,7 +240,6 @@ def build_provider(role: str = "planner"):
     from app.llm.mock import StubLLMProvider, default_by_schema
     from app.llm.openai_compat import BACKENDS, OpenAICompatibleProvider
 
-
     settings = get_settings()
     if os.environ.get("FORGEMIND_MOCK_LLM") == "1":
         flaky = os.environ.get("FORGEMIND_MOCK_LLM_FLAKY") == "1"
@@ -371,6 +369,7 @@ def build_provider(role: str = "planner"):
         [(entry[0], _provider(entry)) for entry in resolved],
         max_retries=settings.llm_max_retries,
     )
+
 
 def build_planner() -> PlanningAgent:
     """Construct the planner from settings/env — used by the worker."""

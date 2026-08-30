@@ -56,7 +56,12 @@ async def structured_output_with_retries(
                 raise
             if attempt >= timeout_retries:
                 raise
-            logger.warning("transient LLM error (%s), retry %d/%d", exc, attempt + 1, timeout_retries)
+            logger.warning(
+                "transient LLM error (%s), retry %d/%d",
+                exc,
+                attempt + 1,
+                timeout_retries,
+            )
         await asyncio.sleep(backoff_base_seconds * (2**attempt))
         attempt += 1
 

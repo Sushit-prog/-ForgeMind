@@ -83,9 +83,7 @@ def test_passing_suite_reports_passed(db_session, tmp_path) -> None:
     assert result.failures == []
 
     # Persisted: one TestRun row, no Failure rows.
-    runs = db_session.scalars(
-        select(TestRun).where(TestRun.task_id == task.id)
-    ).all()
+    runs = db_session.scalars(select(TestRun).where(TestRun.task_id == task.id)).all()
     assert len(runs) == 1
     assert runs[0].status == "passed"
     assert runs[0].exit_code == 0
@@ -113,9 +111,7 @@ def test_failing_suite_reports_failed_with_failures(db_session, tmp_path) -> Non
     assert any("test_bad" in f.test for f in result.failures)
 
     # Persisted: TestRun + the parsed Failure row.
-    runs = db_session.scalars(
-        select(TestRun).where(TestRun.task_id == task.id)
-    ).all()
+    runs = db_session.scalars(select(TestRun).where(TestRun.task_id == task.id)).all()
     assert len(runs) == 1
     assert runs[0].status == "failed"
     failures = db_session.scalars(
@@ -142,9 +138,7 @@ def test_no_test_command_is_error_not_failed(db_session, tmp_path) -> None:
 
     assert result.status == "error"
     assert result.exit_code is None
-    runs = db_session.scalars(
-        select(TestRun).where(TestRun.task_id == task.id)
-    ).all()
+    runs = db_session.scalars(select(TestRun).where(TestRun.task_id == task.id)).all()
     assert runs[0].status == "error"
 
 
@@ -169,9 +163,7 @@ def test_timeout_is_error_not_failed(db_session, tmp_path) -> None:
 
     assert result.status == "error"
     assert result.exit_code is None
-    runs = db_session.scalars(
-        select(TestRun).where(TestRun.task_id == task.id)
-    ).all()
+    runs = db_session.scalars(select(TestRun).where(TestRun.task_id == task.id)).all()
     assert runs[0].status == "error"
     assert runs[0].timed_out is True
 
@@ -187,9 +179,7 @@ def test_parse_test_run_deterministic() -> None:
         "=== 1 failed, 2 passed in 0.6s ===\n"
         "FAILED tests/test_s.py::test_x - AssertionError: nope"
     )
-    failed = parse_test_run(
-        exit_code=1, output=failed_output, timed_out=False
-    )
+    failed = parse_test_run(exit_code=1, output=failed_output, timed_out=False)
     assert failed.status == "failed"
     assert failed.failed == 1
     assert failed.passed == 2

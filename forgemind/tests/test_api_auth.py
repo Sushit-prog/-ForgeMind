@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.config import DEV_API_TOKEN, Settings
-from app.database.session import SessionLocal, engine
+from app.database.session import engine
 from app.main import create_app
 from app.models import AuditLog, Approval, Base, Task
 

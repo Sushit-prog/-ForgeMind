@@ -60,9 +60,7 @@ class LLMProvider(ABC):
     per request is fine (cheap), and callers own retry policy."""
 
     @abstractmethod
-    async def generate(
-        self, messages: list[Message], **kwargs: object
-    ) -> str:
+    async def generate(self, messages: list[Message], **kwargs: object) -> str:
         """Plain text completion — returns the assistant message content."""
 
     @abstractmethod

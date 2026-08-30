@@ -23,10 +23,15 @@ class Policy(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Structured rule definition, e.g. {"type": "shell_allowlist", "allow": [...]}.
     rule: Mapped[dict | None] = mapped_column(JsonType, nullable=True)
-    risk_level: Mapped[str] = mapped_column(String(16), nullable=False, default="MEDIUM")
+    risk_level: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="MEDIUM"
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

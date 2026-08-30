@@ -255,7 +255,9 @@ class StubLLMProvider(LLMProvider):
         self.generate_calls: list[list[Message]] = []
         self.structured_calls: list[list[Message]] = []
 
-    def _next(self, schema_name: str | None = None, messages: list[Message] | None = None) -> str:
+    def _next(
+        self, schema_name: str | None = None, messages: list[Message] | None = None
+    ) -> str:
         if (
             schema_name
             and self._retry_marker

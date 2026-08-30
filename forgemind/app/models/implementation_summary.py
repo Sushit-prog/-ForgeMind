@@ -27,9 +27,7 @@ from app.models.base import Base, JsonType, utcnow
 
 class ImplementationSummary(Base):
     __tablename__ = "implementation_summaries"
-    __table_args__ = (
-        Index("ix_implementation_summaries_task_id", "task_id"),
-    )
+    __table_args__ = (Index("ix_implementation_summaries_task_id", "task_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(
@@ -48,5 +46,8 @@ class ImplementationSummary(Base):
     deviations_from_research: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="COMPLETE")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

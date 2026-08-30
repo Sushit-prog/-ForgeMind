@@ -10,15 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 
-import pytest
 from sqlalchemy import select
 
-from app.agents.planner.schema import Plan
 from app.agents.researcher.agent import ResearchAgent
 from app.agents.researcher.prompt import (
-    build_research_messages,
     observation_message,
     SYSTEM_PROMPT,
 )
@@ -73,7 +69,9 @@ def ctx_for(db_session, task, agent_type="researcher") -> ExecutionContext:
 def tool_calls_for(db_session, task_id) -> list[ToolCall]:
     return list(
         db_session.scalars(
-            select(ToolCall).where(ToolCall.task_id == task_id).order_by(ToolCall.created_at)
+            select(ToolCall)
+            .where(ToolCall.task_id == task_id)
+            .order_by(ToolCall.created_at)
         )
     )
 
@@ -82,9 +80,7 @@ def artifacts_for(db_session, task_id):
     from app.models import ResearchArtifact as ArtifactRow
 
     return list(
-        db_session.scalars(
-            select(ArtifactRow).where(ArtifactRow.task_id == task_id)
-        )
+        db_session.scalars(select(ArtifactRow).where(ArtifactRow.task_id == task_id))
     )
 
 
@@ -182,9 +178,7 @@ def test_unknown_tool_proposal_becomes_failed_observation_not_crash(
     repo, task = repo_task
     step = make_plan_step(db_session, task)
 
-    ghost_proposal = json.dumps(
-        {"tool_call": {"tool": "shell.evil", "input": {}}}
-    )
+    ghost_proposal = json.dumps({"tool_call": {"tool": "shell.evil", "input": {}}})
     provider = StubLLMProvider(
         by_schema={
             "ToolCallProposal": [ghost_proposal, SEARCH_PROPOSAL, FINAL_PROPOSAL],
@@ -390,8 +384,11 @@ def test_no_research_step_in_plan_fails_cleanly(db_session, repo_task) -> None:
     db_session.flush()
     db_session.add(
         PlanStep(
-            plan_id=plan.id, step_type="implement", sequence=1,
-            depends_on=None, params={},
+            plan_id=plan.id,
+            step_type="implement",
+            sequence=1,
+            depends_on=None,
+            params={},
         )
     )
     db_session.commit()

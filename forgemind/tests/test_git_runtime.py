@@ -26,7 +26,10 @@ def make_manager(db_session, tmp_path: Path) -> WorktreeManager:
 
 # --- lifecycle --------------------------------------------------------------
 
-def test_full_lifecycle_clone_read_search_diff_commit(db_session, repo_task, tmp_path) -> None:
+
+def test_full_lifecycle_clone_read_search_diff_commit(
+    db_session, repo_task, tmp_path
+) -> None:
     repo, task = repo_task
     manager = make_manager(db_session, tmp_path)
 
@@ -39,7 +42,11 @@ def test_full_lifecycle_clone_read_search_diff_commit(db_session, repo_task, tmp
     # read / list / search
     access = FileAccess(wt_path)
     assert "VALUE = 1" in access.read_file("src/app.py")
-    assert sorted(access.list_files()) == ["README.md", "src/app.py", "tests/test_app.py"]
+    assert sorted(access.list_files()) == [
+        "README.md",
+        "src/app.py",
+        "tests/test_app.py",
+    ]
     assert [m.path for m in access.search("assert True")] == ["tests/test_app.py"]
 
     # modify -> diff -> commit
@@ -50,7 +57,9 @@ def test_full_lifecycle_clone_read_search_diff_commit(db_session, repo_task, tmp
 
     sha = ops.commit("fix: bump VALUE")
     assert sha
-    assert run_git(wt_path, "log", "-1", "--format=%s").stdout.strip() == "fix: bump VALUE"
+    assert (
+        run_git(wt_path, "log", "-1", "--format=%s").stdout.strip() == "fix: bump VALUE"
+    )
     assert run_git(wt_path, "rev-parse", "HEAD").stdout.strip() == sha
     assert ops.status().clean
 
@@ -84,6 +93,7 @@ def test_clone_happens_once_not_per_task(db_session, repo_task, tmp_path) -> Non
 
 # --- isolation --------------------------------------------------------------
 
+
 def test_two_tasks_get_independent_worktrees(db_session, repo_task, tmp_path) -> None:
     repo, task = repo_task
     manager = make_manager(db_session, tmp_path)
@@ -103,7 +113,9 @@ def test_two_tasks_get_independent_worktrees(db_session, repo_task, tmp_path) ->
     assert "VALUE = 1" in FileAccess(Path(wt2.path)).read_file("src/app.py")
 
 
-def test_commit_on_one_worktree_does_not_move_other(db_session, repo_task, tmp_path) -> None:
+def test_commit_on_one_worktree_does_not_move_other(
+    db_session, repo_task, tmp_path
+) -> None:
     repo, task = repo_task
     manager = make_manager(db_session, tmp_path)
     wt1 = manager.create(task.id, repo)
@@ -116,10 +128,13 @@ def test_commit_on_one_worktree_does_not_move_other(db_session, repo_task, tmp_p
     (Path(wt1.path) / "src" / "app.py").write_text("VALUE = 7\n")
     GitOperations(Path(wt1.path)).commit("fix: seven")
     assert GitOperations(Path(wt2.path)).status().clean  # wt2 untouched
-    assert run_git(Path(wt2.path), "rev-parse", "HEAD").stdout.strip() == wt2.base_commit
+    assert (
+        run_git(Path(wt2.path), "rev-parse", "HEAD").stdout.strip() == wt2.base_commit
+    )
 
 
 # --- never touch main -------------------------------------------------------
+
 
 def test_commit_never_touches_default_branch(db_session, repo_task, tmp_path) -> None:
     repo, task = repo_task
@@ -134,12 +149,15 @@ def test_commit_never_touches_default_branch(db_session, repo_task, tmp_path) ->
     main_after = run_git(clone, "rev-parse", "origin/main").stdout.strip()
     assert main_after == main_before
     # The commit lives on the agent branch only.
-    assert run_git(clone, "rev-parse", wt.branch_name).stdout.strip() == run_git(
-        Path(wt.path), "rev-parse", "HEAD"
-    ).stdout.strip()
+    assert (
+        run_git(clone, "rev-parse", wt.branch_name).stdout.strip()
+        == run_git(Path(wt.path), "rev-parse", "HEAD").stdout.strip()
+    )
 
 
-def test_create_branch_starts_at_base_commit_not_main_head(db_session, repo_task, tmp_path) -> None:
+def test_create_branch_starts_at_base_commit_not_main_head(
+    db_session, repo_task, tmp_path
+) -> None:
     repo, task = repo_task
     manager = make_manager(db_session, tmp_path)
     wt = manager.create(task.id, repo)
@@ -147,9 +165,15 @@ def test_create_branch_starts_at_base_commit_not_main_head(db_session, repo_task
 
     ops = GitOperations(Path(wt.path), base_commit=wt.base_commit)
     ops.create_branch("feature/xyz")
-    assert run_git(Path(wt.path), "rev-parse", "feature/xyz").stdout.strip() == wt.base_commit
+    assert (
+        run_git(Path(wt.path), "rev-parse", "feature/xyz").stdout.strip()
+        == wt.base_commit
+    )
     # Branch creation must not switch the current branch or move main.
-    assert run_git(Path(wt.path), "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == wt.branch_name
+    assert (
+        run_git(Path(wt.path), "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        == wt.branch_name
+    )
     assert run_git(clone, "rev-parse", "origin/main").stdout.strip() == wt.base_commit
 
 
@@ -164,6 +188,7 @@ def test_create_branch_duplicate_name_fails(db_session, repo_task, tmp_path) -> 
 
 
 # --- commit edge cases ------------------------------------------------------
+
 
 def test_commit_with_no_changes_fails(db_session, repo_task, tmp_path) -> None:
     repo, task = repo_task
@@ -194,6 +219,7 @@ def test_commit_uses_fixed_identity(db_session, repo_task, tmp_path) -> None:
 
 # --- discard / recovery -----------------------------------------------------
 
+
 def test_discard_then_path_for_raises(db_session, repo_task, tmp_path) -> None:
     repo, task = repo_task
     manager = make_manager(db_session, tmp_path)
@@ -204,7 +230,9 @@ def test_discard_then_path_for_raises(db_session, repo_task, tmp_path) -> None:
         manager.path_for(wt.id)
 
 
-def test_discard_and_recreate_identical_starting_state(db_session, repo_task, tmp_path) -> None:
+def test_discard_and_recreate_identical_starting_state(
+    db_session, repo_task, tmp_path
+) -> None:
     repo, task = repo_task
     manager = make_manager(db_session, tmp_path)
     wt1 = manager.create(task.id, repo)
@@ -223,7 +251,10 @@ def test_discard_and_recreate_identical_starting_state(db_session, repo_task, tm
     assert Path(wt2.path).is_dir()
     assert FileAccess(Path(wt2.path)).read_file("src/app.py") == state_before["app"]
     assert FileAccess(Path(wt2.path)).read_file("README.md") == state_before["readme"]
-    assert run_git(Path(wt2.path), "rev-parse", "HEAD").stdout.strip() == state_before["head"]
+    assert (
+        run_git(Path(wt2.path), "rev-parse", "HEAD").stdout.strip()
+        == state_before["head"]
+    )
 
 
 def test_manually_deleted_worktree_detected(db_session, repo_task, tmp_path) -> None:
@@ -246,6 +277,7 @@ def test_create_twice_same_task_rejected(db_session, repo_task, tmp_path) -> Non
 
 
 # --- discovery edge cases ---------------------------------------------------
+
 
 def test_clone_failure_bad_url_reported_at_discovery(db_session, tmp_path) -> None:
     repo = Repository(url=str(tmp_path / "does-not-exist"), default_branch="main")

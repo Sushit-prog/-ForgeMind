@@ -37,7 +37,6 @@ from app.llm import StubLLMProvider
 from app.llm.mock import FINAL_PROPOSAL, RESEARCH_ARTIFACT_RESPONSE, SEARCH_PROPOSAL
 from app.models import (
     ExecutionEvent,
-    FailureClassification as ClassificationRow,
     ReviewResult as ReviewRow,
     SecurityResult as SecurityRow,
     Task,
@@ -49,36 +48,62 @@ from app.runtime.task_lifecycle import advance_task_with_agents, transition_task
 # --- canned fragments -------------------------------------------------------
 
 WRITE_2 = json.dumps(
-    {"tool_call": {"tool": "filesystem.write_file",
-                   "input": {"path": "src/app.py", "content": "VALUE = 2\n"}}}
+    {
+        "tool_call": {
+            "tool": "filesystem.write_file",
+            "input": {"path": "src/app.py", "content": "VALUE = 2\n"},
+        }
+    }
 )
 WRITE_3 = json.dumps(
-    {"tool_call": {"tool": "filesystem.write_file",
-                   "input": {"path": "src/app.py", "content": "VALUE = 3\n"}}}
+    {
+        "tool_call": {
+            "tool": "filesystem.write_file",
+            "input": {"path": "src/app.py", "content": "VALUE = 3\n"},
+        }
+    }
 )
-COMMIT = json.dumps(
-    {"tool_call": {"tool": "git.commit", "input": {"message": "fix"}}}
-)
+COMMIT = json.dumps({"tool_call": {"tool": "git.commit", "input": {"message": "fix"}}})
 SUMMARY = json.dumps(
-    {"files_changed": ["src/app.py"], "summary": "updated VALUE",
-     "tests_added": [], "deviations_from_research": None}
+    {
+        "files_changed": ["src/app.py"],
+        "summary": "updated VALUE",
+        "tests_added": [],
+        "deviations_from_research": None,
+    }
 )
 READ_APP = json.dumps(
     {"tool_call": {"tool": "repository.read_file", "input": {"path": "src/app.py"}}}
 )
 APPROVE = json.dumps({"decision": "APPROVE", "issues": [], "severity": "low"})
 REQUEST_CHANGES = json.dumps(
-    {"decision": "REQUEST_CHANGES",
-     "issues": [{"description": "Use VALUE = 3 instead of 2.",
-                 "severity": "medium", "file": "src/app.py", "line": 1}],
-     "severity": "medium"}
+    {
+        "decision": "REQUEST_CHANGES",
+        "issues": [
+            {
+                "description": "Use VALUE = 3 instead of 2.",
+                "severity": "medium",
+                "file": "src/app.py",
+                "line": 1,
+            }
+        ],
+        "severity": "medium",
+    }
 )
 SECURITY_PASS = json.dumps({"decision": "PASS", "findings": []})
 SECURITY_FAIL = json.dumps(
-    {"decision": "FAIL",
-     "findings": [{"category": "SECRETS", "file": "src/app.py", "line": 1,
-                   "description": "Prefer VALUE = 3.",
-                   "severity": "medium"}]}
+    {
+        "decision": "FAIL",
+        "findings": [
+            {
+                "category": "SECRETS",
+                "file": "src/app.py",
+                "line": 1,
+                "description": "Prefer VALUE = 3.",
+                "severity": "medium",
+            }
+        ],
+    }
 )
 
 
@@ -167,34 +192,54 @@ def agents(developer_queue=None, review_queue=None, security_queue=None):
             }
         )
     )
-    return planner, researcher, developer, TestAgent(), DebuggerAgent(
-        StubLLMProvider(
-            by_schema={
-                "ToolCallProposal": [READ_APP, FINAL_PROPOSAL],
-                "FailureClassification": [json.dumps(
-                    {"category": "CODE_FAILURE",
-                     "root_cause": "x", "fix_instruction": "use VALUE = 3",
-                     "fixable": True}
-                )],
-            }
-        )
-    ), reviewer, security
+    return (
+        planner,
+        researcher,
+        developer,
+        TestAgent(),
+        DebuggerAgent(
+            StubLLMProvider(
+                by_schema={
+                    "ToolCallProposal": [READ_APP, FINAL_PROPOSAL],
+                    "FailureClassification": [
+                        json.dumps(
+                            {
+                                "category": "CODE_FAILURE",
+                                "root_cause": "x",
+                                "fix_instruction": "use VALUE = 3",
+                                "fixable": True,
+                            }
+                        )
+                    ],
+                }
+            )
+        ),
+        reviewer,
+        security,
+    )
 
 
 def drive(db_session, task: Task, a) -> TaskStatus | None:
     planner, researcher, developer, tester, debugger, reviewer, security = a
     return run(
         advance_task_with_agents(
-            db_session, task.id,
-            planner=planner, researcher=researcher, developer=developer,
-            tester=tester, debugger=debugger, reviewer=reviewer, security=security,
+            db_session,
+            task.id,
+            planner=planner,
+            researcher=researcher,
+            developer=developer,
+            tester=tester,
+            debugger=debugger,
+            reviewer=reviewer,
+            security=security,
         )
     )
 
 
 def events_for(db_session, task_id: uuid.UUID) -> list[tuple[str, str]]:
     events = db_session.scalars(
-        select(ExecutionEvent).where(ExecutionEvent.task_id == task_id)
+        select(ExecutionEvent)
+        .where(ExecutionEvent.task_id == task_id)
         .order_by(ExecutionEvent.created_at, ExecutionEvent.id)
     ).all()
     return [(e.from_status, e.to_status) for e in events]
@@ -222,7 +267,14 @@ def test_review_reject_then_approve_reaches_verification(db_session, tmp_path) -
     repo = make_repo(tmp_path, accepts=("VALUE = 2", "VALUE = 3"))
     task = make_task(db_session, repo)
     a = agents(
-        developer_queue=[WRITE_2, COMMIT, FINAL_PROPOSAL, WRITE_3, COMMIT, FINAL_PROPOSAL],
+        developer_queue=[
+            WRITE_2,
+            COMMIT,
+            FINAL_PROPOSAL,
+            WRITE_3,
+            COMMIT,
+            FINAL_PROPOSAL,
+        ],
         review_queue=[REQUEST_CHANGES, APPROVE],
     )
 
@@ -267,7 +319,14 @@ def test_security_fail_then_pass_reaches_verification(db_session, tmp_path) -> N
     repo = make_repo(tmp_path, accepts=("VALUE = 2", "VALUE = 3"))
     task = make_task(db_session, repo)
     a = agents(
-        developer_queue=[WRITE_2, COMMIT, FINAL_PROPOSAL, WRITE_3, COMMIT, FINAL_PROPOSAL],
+        developer_queue=[
+            WRITE_2,
+            COMMIT,
+            FINAL_PROPOSAL,
+            WRITE_3,
+            COMMIT,
+            FINAL_PROPOSAL,
+        ],
         security_queue=[SECURITY_FAIL, SECURITY_PASS],
     )
 
@@ -317,12 +376,24 @@ def test_replan_count_accumulates_across_sources(db_session, tmp_path) -> None:
     task = make_task(db_session, repo)
     a = agents(
         developer_queue=[
-            WRITE_2, COMMIT, FINAL_PROPOSAL,   # run 1 -> REVIEWING
-            WRITE_3, COMMIT, FINAL_PROPOSAL,   # run 2 (reviewer replan)
-            WRITE_2, COMMIT, FINAL_PROPOSAL,   # run 3 -> REVIEWING again
-            WRITE_3, COMMIT, FINAL_PROPOSAL,   # run 4 (security replan)
-            WRITE_2, COMMIT, FINAL_PROPOSAL,   # run 5 -> REVIEWING
-            WRITE_3, COMMIT, FINAL_PROPOSAL,   # run 6 -> security passes
+            WRITE_2,
+            COMMIT,
+            FINAL_PROPOSAL,  # run 1 -> REVIEWING
+            WRITE_3,
+            COMMIT,
+            FINAL_PROPOSAL,  # run 2 (reviewer replan)
+            WRITE_2,
+            COMMIT,
+            FINAL_PROPOSAL,  # run 3 -> REVIEWING again
+            WRITE_3,
+            COMMIT,
+            FINAL_PROPOSAL,  # run 4 (security replan)
+            WRITE_2,
+            COMMIT,
+            FINAL_PROPOSAL,  # run 5 -> REVIEWING
+            WRITE_3,
+            COMMIT,
+            FINAL_PROPOSAL,  # run 6 -> security passes
         ],
         review_queue=[REQUEST_CHANGES, APPROVE],
         security_queue=[SECURITY_FAIL, SECURITY_PASS],
@@ -439,14 +510,26 @@ def test_verification_catches_stale_commit(db_session, tmp_path) -> None:
     reviewed_sha = GitOperations(wt_path).head_sha()
     db_session.add(
         ImplementationSummary(
-            task_id=task.id, worktree_id=worktree.id, commit_sha=reviewed_sha,
-            files_changed=["src/app.py"], summary="s", tests_added=[],
-            deviations_from_research=None, status="COMPLETE",
+            task_id=task.id,
+            worktree_id=worktree.id,
+            commit_sha=reviewed_sha,
+            files_changed=["src/app.py"],
+            summary="s",
+            tests_added=[],
+            deviations_from_research=None,
+            status="COMPLETE",
         )
     )
     db_session.add(
-        TestRun(task_id=task.id, worktree_id=worktree.id, status="passed",
-                passed=1, failed=0, duration_ms=10, exit_code=0)
+        TestRun(
+            task_id=task.id,
+            worktree_id=worktree.id,
+            status="passed",
+            passed=1,
+            failed=0,
+            duration_ms=10,
+            exit_code=0,
+        )
     )
     db_session.commit()
 
@@ -494,15 +577,27 @@ def test_verification_catches_stale_test_result(db_session, tmp_path) -> None:
     reviewed_sha = GitOperations(wt_path).head_sha()
     db_session.add(
         ImplementationSummary(
-            task_id=task.id, worktree_id=worktree.id, commit_sha=reviewed_sha,
-            files_changed=["src/app.py"], summary="s", tests_added=[],
-            deviations_from_research=None, status="COMPLETE",
+            task_id=task.id,
+            worktree_id=worktree.id,
+            commit_sha=reviewed_sha,
+            files_changed=["src/app.py"],
+            summary="s",
+            tests_added=[],
+            deviations_from_research=None,
+            status="COMPLETE",
         )
     )
     # The LAST test run is a failure (a new run invalidated the passing one).
     db_session.add(
-        TestRun(task_id=task.id, worktree_id=worktree.id, status="failed",
-                passed=0, failed=1, duration_ms=10, exit_code=1)
+        TestRun(
+            task_id=task.id,
+            worktree_id=worktree.id,
+            status="failed",
+            passed=0,
+            failed=1,
+            duration_ms=10,
+            exit_code=1,
+        )
     )
     db_session.commit()
 

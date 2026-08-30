@@ -62,7 +62,10 @@ Produce a plan that resolves the objective. Return a single JSON object
 matching this exact schema:
 
 {schema_hint}"""
-    return [Message(role="system", content=SYSTEM_PROMPT), Message(role="user", content=user)]
+    return [
+        Message(role="system", content=SYSTEM_PROMPT),
+        Message(role="user", content=user),
+    ]
 
 
 def build_correction_messages(

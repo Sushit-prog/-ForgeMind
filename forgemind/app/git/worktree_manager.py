@@ -151,9 +151,7 @@ class WorktreeManager:
             return wt
         repository = self.db.get(Repository, task.repository_id)
         if repository is None:
-            raise WorktreeNotFoundError(
-                detail=f"no repository row for task {task.id}"
-            )
+            raise WorktreeNotFoundError(detail=f"no repository row for task {task.id}")
         for _ in range(2):
             try:
                 return self.create(task.id, repository)

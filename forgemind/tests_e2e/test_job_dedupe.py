@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-import pytest
 import redis.asyncio as aioredis
 from arq import create_pool
 

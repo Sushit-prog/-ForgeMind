@@ -21,9 +21,7 @@ from app.models.base import Base, utcnow
 
 class TestRun(Base):
     __tablename__ = "test_runs"
-    __table_args__ = (
-        Index("ix_test_runs_task_id", "task_id"),
-    )
+    __table_args__ = (Index("ix_test_runs_task_id", "task_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(
@@ -32,7 +30,9 @@ class TestRun(Base):
     worktree_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("worktrees.id", ondelete="SET NULL"), nullable=True
     )
-    status: Mapped[str] = mapped_column(String(16), nullable=False)  # passed|failed|error
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # passed|failed|error
     passed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -40,7 +40,10 @@ class TestRun(Base):
     timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     output: Mapped[str | None] = mapped_column(Text, nullable=True)  # truncated
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )
 
     failures: Mapped[list["Failure"]] = relationship(
@@ -60,7 +63,10 @@ class Failure(Base):
     test: Mapped[str] = mapped_column(String(512), nullable=False)
     output: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )
 
     test_run: Mapped["TestRun"] = relationship(back_populates="failures")

@@ -22,7 +22,9 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_git_tools_end_to_end_on_postgres(client, db_session, repo_task, tmp_path) -> None:
+def test_git_tools_end_to_end_on_postgres(
+    client, db_session, repo_task, tmp_path
+) -> None:
     repo, task = repo_task
     wt = WorktreeManager(db_session, cache_dir=tmp_path / "cache").create(task.id, repo)
     ctx = make_execution_context(task_id=task.id, agent_type="developer", db=db_session)

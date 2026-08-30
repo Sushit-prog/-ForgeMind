@@ -21,9 +21,7 @@ from app.models.base import Base, utcnow
 
 class FailureClassification(Base):
     __tablename__ = "failure_classifications"
-    __table_args__ = (
-        Index("ix_failure_classifications_task_id", "task_id"),
-    )
+    __table_args__ = (Index("ix_failure_classifications_task_id", "task_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(
@@ -38,5 +36,8 @@ class FailureClassification(Base):
     fixable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_flaky: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

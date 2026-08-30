@@ -56,13 +56,25 @@ class Tool(ABC):
         if not cls.description:
             raise TypeError(f"{cls.__name__} must define a non-empty `description`")
         if cls.input_schema is None or cls.output_schema is None:
-            raise TypeError(f"{cls.__name__} must define input_schema and output_schema")
-        if not isinstance(cls.input_schema, type) or not issubclass(cls.input_schema, BaseModel):
-            raise TypeError(f"{cls.__name__}.input_schema must be a pydantic BaseModel class")
-        if not isinstance(cls.output_schema, type) or not issubclass(cls.output_schema, BaseModel):
-            raise TypeError(f"{cls.__name__}.output_schema must be a pydantic BaseModel class")
+            raise TypeError(
+                f"{cls.__name__} must define input_schema and output_schema"
+            )
+        if not isinstance(cls.input_schema, type) or not issubclass(
+            cls.input_schema, BaseModel
+        ):
+            raise TypeError(
+                f"{cls.__name__}.input_schema must be a pydantic BaseModel class"
+            )
+        if not isinstance(cls.output_schema, type) or not issubclass(
+            cls.output_schema, BaseModel
+        ):
+            raise TypeError(
+                f"{cls.__name__}.output_schema must be a pydantic BaseModel class"
+            )
         if cls.risk not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
-            raise TypeError(f"{cls.__name__}.risk must be one of LOW/MEDIUM/HIGH/CRITICAL")
+            raise TypeError(
+                f"{cls.__name__}.risk must be one of LOW/MEDIUM/HIGH/CRITICAL"
+            )
 
     @abstractmethod
     async def execute(self, input: BaseModel, ctx: ExecutionContext) -> BaseModel:

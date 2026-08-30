@@ -10,7 +10,6 @@ import pytest
 from app.github.client import GitHubClient
 from app.github.errors import (
     GitHubAuthError,
-    GitHubError,
     GitHubNotFoundError,
     GitHubRateLimitError,
 )

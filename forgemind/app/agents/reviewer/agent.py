@@ -181,7 +181,8 @@ class ReviewerAgent(Agent):
         # synthesis) — a decision is required for routing.
         logger.warning(
             "Reviewer tool budget (%d) exhausted for task %s — forcing verdict",
-            self.max_tool_calls, task.id,
+            self.max_tool_calls,
+            task.id,
         )
         db.add(
             AuditLog(
@@ -229,7 +230,9 @@ class ReviewerAgent(Agent):
         except Exception as exc:  # noqa: BLE001 — contract errors surface as FAILED obs
             logger.warning("reviewer tool %s raised: %s", call.tool, exc)
             self._audit(
-                db, task_id, "reviewer.unexpected_denial",
+                db,
+                task_id,
+                "reviewer.unexpected_denial",
                 {"tool": call.tool, "surfaced_as": "error", "error": str(exc)},
             )
             return Observation(
@@ -241,7 +244,9 @@ class ReviewerAgent(Agent):
                 "Reviewer tool %s denied: %s", call.tool, result.denial_reason
             )
             self._audit(
-                db, task_id, "reviewer.unexpected_denial",
+                db,
+                task_id,
+                "reviewer.unexpected_denial",
                 {
                     "tool": call.tool,
                     "surfaced_as": "denied",
@@ -289,7 +294,9 @@ class ReviewerAgent(Agent):
             self._persist(db, task, review, commit_sha)
             logger.info(
                 "Review for task %s: %s (%d issues)",
-                task.id, review.decision, len(review.issues),
+                task.id,
+                review.decision,
+                len(review.issues),
             )
             return review
 
@@ -298,9 +305,7 @@ class ReviewerAgent(Agent):
             f"{task.id} after the retry-once path: {last_error}"
         )
 
-    def _persist(
-        self, db, task: Task, review: ReviewResult, commit_sha: str
-    ) -> None:
+    def _persist(self, db, task: Task, review: ReviewResult, commit_sha: str) -> None:
         db.add(
             ReviewResultRow(
                 task_id=task.id,

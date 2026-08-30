@@ -59,7 +59,7 @@ def test_inner_deadline_fires_while_db_call_blocks(db_session, short_deadline) -
     db_session.commit()
     db_session.close()  # victim gets its own session inside advance_task
 
-    holder = SessionLocal_holding_lock(task.id, hold_seconds=6)
+    SessionLocal_holding_lock(task.id, hold_seconds=6)
 
     ctx = {"redis": NoopRedis()}
     started = time.monotonic()

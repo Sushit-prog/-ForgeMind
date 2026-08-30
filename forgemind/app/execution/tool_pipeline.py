@@ -41,7 +41,7 @@ from sqlalchemy.orm import Session
 from app.models import ToolCall, ToolCallStatus
 from app.policies.engine import PolicyEngine
 from app.tools.base import ExecutionContext, Tool
-from app.tools.registry import ToolNotFoundError, ToolRegistry
+from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -153,9 +153,16 @@ class ToolPipeline:
             return self._record_denied(tool, validated, ctx, reason)
 
         # (3) policy check — deterministic, fail-closed; DENY is final.
-        decision = self._default_policy_engine().evaluate(tool, validated, agent_capabilities)
+        decision = self._default_policy_engine().evaluate(
+            tool, validated, agent_capabilities
+        )
         if not decision.allowed:
-            logger.warning("Tool %s denied by policy rule %s: %s", tool_name, decision.rule, decision.reason)
+            logger.warning(
+                "Tool %s denied by policy rule %s: %s",
+                tool_name,
+                decision.rule,
+                decision.reason,
+            )
             return self._record_denied(tool, validated, ctx, decision.reason)
 
         # (4) execute under an audit row (status ALLOWED -> EXECUTED/FAILED).
@@ -182,7 +189,12 @@ class ToolPipeline:
             row.latency_ms = latency_ms
             self.db.commit()  # audit row survives whatever the caller does
             logger.error("Tool %s failed after %dms: %s", tool_name, latency_ms, exc)
-            return ToolResult(tool_name=tool_name, status="FAILED", error=str(exc), latency_ms=latency_ms)
+            return ToolResult(
+                tool_name=tool_name,
+                status="FAILED",
+                error=str(exc),
+                latency_ms=latency_ms,
+            )
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         row.status = ToolCallStatus.EXECUTED.value
@@ -229,4 +241,6 @@ def make_execution_context(
     db=None,
 ) -> ExecutionContext:
     """Convenience builder for tests and callers."""
-    return ExecutionContext(task_id=task_id, step_id=step_id, agent_type=agent_type, db=db)
+    return ExecutionContext(
+        task_id=task_id, step_id=step_id, agent_type=agent_type, db=db
+    )

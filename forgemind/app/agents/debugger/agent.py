@@ -231,8 +231,13 @@ class DebuggerAgent(Agent):
 
             if proposal.final:
                 return await self._classify(
-                    db, task, messages, observations, informative,
-                    first_run_id, forced=False,
+                    db,
+                    task,
+                    messages,
+                    observations,
+                    informative,
+                    first_run_id,
+                    forced=False,
                 )
 
             obs = await self._execute_tool(proposal.tool_call, worktree.id, db, task.id)
@@ -244,7 +249,8 @@ class DebuggerAgent(Agent):
         # LLM has seen the failure data.
         logger.warning(
             "Debugger tool budget (%d) exhausted for task %s — forcing classification",
-            self.max_tool_calls, task.id,
+            self.max_tool_calls,
+            task.id,
         )
         db.add(
             AuditLog(
@@ -258,8 +264,13 @@ class DebuggerAgent(Agent):
         )
         db.commit()
         return await self._classify(
-            db, task, messages, observations, informative,
-            first_run_id, forced=True,
+            db,
+            task,
+            messages,
+            observations,
+            informative,
+            first_run_id,
+            forced=True,
         )
 
     # -- internals -----------------------------------------------------------
@@ -285,14 +296,19 @@ class DebuggerAgent(Agent):
         try:
             await TestAgent().run(task, worktree, tester_ctx)
         except Exception as exc:  # noqa: BLE001 — a failed re-run is not a crash
-            logger.warning("debugger flakiness re-run failed for task %s: %s", task.id, exc)
+            logger.warning(
+                "debugger flakiness re-run failed for task %s: %s", task.id, exc
+            )
             return None
         rerun = self._latest_run(db, task)
         if rerun is None:
             return None
         logger.info(
             "Debugger flakiness re-run for task %s: %s (%d passed, %d failed)",
-            task.id, rerun.status, rerun.passed, rerun.failed,
+            task.id,
+            rerun.status,
+            rerun.passed,
+            rerun.failed,
         )
         return rerun
 
@@ -333,9 +349,7 @@ class DebuggerAgent(Agent):
         """Describe how the re-run's failure mode differed from the first."""
         if rerun is None:
             return None
-        first_result = (
-            result_from_row(first) if isinstance(first, TestRun) else first
-        )
+        first_result = result_from_row(first) if isinstance(first, TestRun) else first
         if first_result.status == "failed" and rerun.status == "error":
             return (
                 f"first run failed with exit {first_result.exit_code}; "
@@ -368,7 +382,9 @@ class DebuggerAgent(Agent):
         except Exception as exc:  # noqa: BLE001 — contract errors surface as FAILED obs
             logger.warning("debugger tool %s raised: %s", call.tool, exc)
             self._audit(
-                db, task_id, "debugger.unexpected_denial",
+                db,
+                task_id,
+                "debugger.unexpected_denial",
                 {"tool": call.tool, "surfaced_as": "error", "error": str(exc)},
             )
             return Observation(
@@ -383,7 +399,9 @@ class DebuggerAgent(Agent):
                 "Debugger tool %s denied: %s", call.tool, result.denial_reason
             )
             self._audit(
-                db, task_id, "debugger.unexpected_denial",
+                db,
+                task_id,
+                "debugger.unexpected_denial",
                 {
                     "tool": call.tool,
                     "surfaced_as": "denied",
@@ -419,12 +437,14 @@ class DebuggerAgent(Agent):
         last_error: str | None = None
         for _ in range(2):  # one correction retry
             try:
-                classification: FailureClassification = await structured_output_with_retries(
-                    self.provider,
-                    synth,
-                    FailureClassification,
-                    timeout_retries=self.timeout_retries,
-                    backoff_base_seconds=self.backoff_base,
+                classification: FailureClassification = (
+                    await structured_output_with_retries(
+                        self.provider,
+                        synth,
+                        FailureClassification,
+                        timeout_retries=self.timeout_retries,
+                        backoff_base_seconds=self.backoff_base,
+                    )
                 )
             except LLMMalformedOutputError as exc:
                 last_error = str(exc)
@@ -433,7 +453,9 @@ class DebuggerAgent(Agent):
             self._persist(db, task, classification, test_run_id=test_run_id)
             logger.info(
                 "Failure classified for task %s: %s (fixable=%s)",
-                task.id, classification.category, classification.fixable,
+                task.id,
+                classification.category,
+                classification.fixable,
             )
             return classification
 

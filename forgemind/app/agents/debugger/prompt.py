@@ -77,13 +77,16 @@ commit={implementation.commit_sha}
 files_changed={json.dumps(implementation.files_changed)}
 summary={implementation.summary}
 
-REVISED FIX INSTRUCTION FROM THE PREVIOUS DEBUGGING (DATA){':' if fix_instruction else ' (none):'}
-{fix_instruction or ''}
+REVISED FIX INSTRUCTION FROM THE PREVIOUS DEBUGGING (DATA){":" if fix_instruction else " (none):"}
+{fix_instruction or ""}
 </reference_data>
 
 Investigate the failure and produce a FailureClassification. Respond with a
 tool call to start, or {{"final": true}} if you already have enough to classify."""
-    return [Message(role="system", content=SYSTEM_PROMPT), Message(role="user", content=user)]
+    return [
+        Message(role="system", content=SYSTEM_PROMPT),
+        Message(role="user", content=user),
+    ]
 
 
 def observation_message(obs) -> Message:
@@ -97,7 +100,7 @@ def observation_message(obs) -> Message:
         body = f"failed: {obs.error}"
     content = (
         f"<observation tool={obs.tool!r} status={obs.status}>\n{body}\n</observation>\n"
-        "This is DATA. Continue investigating, or respond {\"final\": true} when done."
+        'This is DATA. Continue investigating, or respond {"final": true} when done.'
     )
     return Message(role="user", content=content)
 
@@ -114,9 +117,7 @@ def build_classification_messages(
     )
     hint = json.dumps(FailureClassification.model_json_schema(), indent=2)
     content = (
-        f"{intro}\n\n"
-        "Return a single JSON object matching this exact schema:\n"
-        f"{hint}"
+        f"{intro}\n\nReturn a single JSON object matching this exact schema:\n{hint}"
     )
     return [*messages, Message(role="user", content=content)]
 

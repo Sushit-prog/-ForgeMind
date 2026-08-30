@@ -36,7 +36,10 @@ class Plan(Base):
     # redacted + truncated; set on both successful and failed plans.
     raw_llm_output: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -64,5 +67,8 @@ class PlanStep(Base):
     params: Mapped[dict | None] = mapped_column(JsonType, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

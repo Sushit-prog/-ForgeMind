@@ -21,9 +21,7 @@ from app.models.base import Base, JsonType, utcnow
 
 class SecurityResult(Base):
     __tablename__ = "security_results"
-    __table_args__ = (
-        Index("ix_security_results_task_id", "task_id"),
-    )
+    __table_args__ = (Index("ix_security_results_task_id", "task_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(
@@ -33,5 +31,8 @@ class SecurityResult(Base):
     decision: Mapped[str] = mapped_column(String(16), nullable=False)
     findings: Mapped[list] = mapped_column(JsonType, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
     )

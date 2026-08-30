@@ -10,12 +10,11 @@ import pytest
 from sqlalchemy import select
 
 from app.models import ExecutionEvent, Repository, Task, TaskStatus
-from app.runtime.state_machine import IllegalTransitionError, TERMINAL_STATES
+from app.runtime.state_machine import IllegalTransitionError
 from app.runtime.task_lifecycle import (
     AUTO_PIPELINE,
     USER_CANCELLED,
     advance_task_once,
-    next_status,
     transition_task,
 )
 
