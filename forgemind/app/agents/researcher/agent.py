@@ -21,6 +21,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.agents._budget import Note, ToolBudget
 from app.agents.base import Agent, structured_output_with_retries
 from app.agents.researcher.prompt import (
     build_artifact_correction,
@@ -34,7 +35,7 @@ from app.agents.researcher.schema import (
     unobserved_files,
 )
 from app.config import get_settings
-from app.execution import ToolPipeline
+from app.execution import ToolInputValidationError, ToolPipeline
 from app.llm.errors import LLMMalformedOutputError
 from app.llm.provider import LLMProvider, Message
 from app.models import AuditLog
@@ -99,6 +100,7 @@ class ResearchAgent(Agent):
         provider: LLMProvider,
         *,
         max_tool_calls: int | None = None,
+        max_rejections: int | None = None,
         timeout_retries: int | None = None,
         backoff_base_seconds: float = 0.5,
     ) -> None:
@@ -108,6 +110,11 @@ class ResearchAgent(Agent):
             settings.max_research_tool_calls
             if max_tool_calls is None
             else max_tool_calls
+        )
+        self.max_rejections = (
+            settings.max_tool_call_rejections
+            if max_rejections is None
+            else max_rejections
         )
         self.timeout_retries = (
             settings.llm_max_retries if timeout_retries is None else timeout_retries
@@ -127,8 +134,9 @@ class ResearchAgent(Agent):
         worktree = await asyncio.to_thread(self._ensure_worktree, db, task)
         messages = build_research_messages(task, plan_step, repo_metadata=None)
         observations: list[Observation] = []
+        budget = ToolBudget(self.max_tool_calls, self.max_rejections)
 
-        for _ in range(self.max_tool_calls):
+        while budget.should_continue():
             try:
                 proposal: ToolCallProposal = await structured_output_with_retries(
                     self.provider,
@@ -152,19 +160,27 @@ class ResearchAgent(Agent):
                 continue
 
             if proposal.final:
+                budget.note(Note.FINAL)
                 return await self._synthesize(
                     db, task, messages, observations, forced=False
                 )
 
-            obs = await self._execute_tool(proposal.tool_call, worktree.id, db, task.id)
+            obs, outcome = await self._execute_tool(
+                proposal.tool_call, worktree.id, db, task.id
+            )
+            budget.note(outcome)
             observations.append(obs)
             messages.append(observation_message(obs))
 
-        # Budget exhausted without a final answer: force synthesis, audit it.
+        # Budget/rejection allowance exhausted without a final answer: force
+        # synthesis, audit it with the actual counters.
         logger.warning(
-            "Research tool budget (%d) exhausted for task %s — forcing synthesis",
-            self.max_tool_calls,
+            "Research tool run ended for task %s (executed=%d rejections=%d, %s) — "
+            "forcing synthesis",
             task.id,
+            budget.executed,
+            budget.rejections,
+            budget.exhausted_by_what(),
         )
         db.add(
             AuditLog(
@@ -173,7 +189,12 @@ class ResearchAgent(Agent):
                 action="research.budget_exhausted",
                 entity_type="task",
                 entity_id=str(task.id),
-                details={"max_tool_calls": self.max_tool_calls},
+                details={
+                    "executed_tool_calls": budget.executed,
+                    "rejections": budget.rejections,
+                    "max_tool_calls": self.max_tool_calls,
+                    "max_rejections": self.max_rejections,
+                },
             )
         )
         db.commit()
@@ -192,8 +213,16 @@ class ResearchAgent(Agent):
         worktree_id: uuid.UUID,
         db,
         task_id: uuid.UUID,
-    ) -> Observation:
+    ) -> tuple[Observation, Note]:
         """Run ONE proposal through the pipeline under Research's capabilities.
+
+        Returns ``(Observation, Note)`` — the second element is budget
+        accounting: ``Note.EXECUTED`` when ``execute`` ran (success or
+        runtime failure), ``Note.REJECTED`` for anything that never reached
+        ``execute`` (validation error, DENY, unknown tool). A schema
+        rejection such as ``repository.search`` sent with ``pattern`` instead
+        of ``query`` therefore costs the small rejection allowance, not a
+        real research tool-call slot.
 
         The worktree_id is injected server-side: the LLM names the tool and
         its path/query input, never a workspace handle. Any tool outside the
@@ -211,19 +240,38 @@ class ResearchAgent(Agent):
             result = await ToolPipeline(db).invoke(
                 call.tool, tool_input, set(self.capabilities), ctx
             )
-        except Exception as exc:  # noqa: BLE001 — contract errors surface as FAILED obs
+        except ToolInputValidationError as exc:
+            logger.warning(
+                "research tool %s invalid input (rejection): %s", call.tool, exc
+            )
+            return (
+                Observation(
+                    tool=call.tool, status="FAILED", input=tool_input, error=str(exc)
+                ),
+                Note.REJECTED,
+            )
+        except Exception as exc:  # noqa: BLE001 — pre-execution contract errors
             logger.warning("research tool %s raised: %s", call.tool, exc)
-            return Observation(
-                tool=call.tool, status="FAILED", input=tool_input, error=str(exc)
+            return (
+                Observation(
+                    tool=call.tool, status="FAILED", input=tool_input, error=str(exc)
+                ),
+                Note.REJECTED,
             )
 
-        return Observation(
-            tool=call.tool,
-            status=result.status,
-            input=tool_input,
-            output=result.output,
-            error=result.error,
-            denial_reason=result.denial_reason,
+        outcome = (
+            Note.EXECUTED if result.status in ("EXECUTED", "FAILED") else Note.REJECTED
+        )
+        return (
+            Observation(
+                tool=call.tool,
+                status=result.status,
+                input=tool_input,
+                output=result.output,
+                error=result.error,
+                denial_reason=result.denial_reason,
+            ),
+            outcome,
         )
 
     async def _synthesize(

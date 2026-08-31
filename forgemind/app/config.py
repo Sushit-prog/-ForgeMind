@@ -180,6 +180,20 @@ class Settings(BaseSettings):
         default=20,
         description="Max tool calls per developer run (env: MAX_DEVELOPER_TOOL_CALLS).",
     )
+    # Tool-call penalty cap (Phase 7 fix): non-executed rejections — a
+    # pre-execution schema-validation error, a capability/policy DENY, or an
+    # unknown tool — never count against the real (executed) tool budget.
+    # Model param-phrasing drift (e.g. repository.search "pattern" vs "query")
+    # must not starve the agent of budget before it lands one real call. This
+    # is a SMALL fixed allowance of successive rejections, independent of
+    # max_*_tool_calls, so a pathological model loops cannot run forever.
+    max_tool_call_rejections: int = Field(
+        default=5,
+        description=(
+            "Max successive non-executed tool rejections per run "
+            "(env: MAX_TOOL_CALL_REJECTIONS)."
+        ),
+    )
     # Debugger agent (Phase 8): hard cap on investigation tool calls per task
     # before a forced classification.
     max_debugger_tool_calls: int = Field(

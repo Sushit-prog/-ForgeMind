@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.git.worktree_manager import WorktreeManager
 from app.repository.file_access import FileAccess
@@ -30,9 +30,23 @@ class ReadFileOutput(BaseModel):
 
 
 class SearchInput(BaseModel):
+    # populate_by_name: accept BOTH the canonical field name "query" AND the
+    # "pattern" alias — real LLM drift toward "pattern" (observed ~28x in the
+    # PostHog run) must not be a validation rejection. "query" stays the
+    # canonical attribute, so the audit row's model_dump() (by_alias=False)
+    # always records "query", never "pattern".
+    model_config = ConfigDict(populate_by_name=True)
+
     worktree_id: uuid.UUID
-    query: str = Field(min_length=1, max_length=500)
+    query: str = Field(min_length=1, max_length=500, alias="pattern")
     glob: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _map_pattern_to_query(cls, data):
+        if isinstance(data, dict) and "pattern" in data and "query" not in data:
+            data = {**data, "query": data["pattern"]}
+        return data
 
 
 class SearchOutput(BaseModel):

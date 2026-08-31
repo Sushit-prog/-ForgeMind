@@ -437,6 +437,56 @@ def test_budget_exhaustion_without_commit_is_hard_failure(
     assert rows[0].status == "INCOMPLETE"
 
 
+def test_validation_rejections_cost_less_than_executed_calls(
+    db_session, repo_task
+) -> None:
+    """Regression (budget fix): a pre-execution schema rejection must NOT
+    consume a real executed tool-call slot. max_tool_calls counts EXECUTED
+    calls only; rejections have their own small allowance. Under the OLD
+    `for _ in range(max_tool_calls)` accounting, the two invalid searches
+    below (both rejected before execute) would have consumed the entire
+    2-slot budget and the developer would hard-fail with no commit. Now they
+    are counted as rejections (allowance=2), so the write + commit still
+    execute and the developer completes."""
+    repo, task = repo_task
+    step = make_implement_step(db_session, task)
+    artifact = make_research_artifact(db_session, task)
+
+    # Two genuinely-invalid searches (neither query NOR pattern) — these still
+    # fail schema validation even with the pattern alias, and so emit no row.
+    invalid_search = json.dumps(
+        {"tool_call": {"tool": "repository.search", "input": {"glob": "*.tsx"}}}
+    )
+    provider = StubLLMProvider(
+        by_schema={
+            "ToolCallProposal": [
+                invalid_search,  # rejection 1
+                invalid_search,  # rejection 2
+                WRITE_PROPOSAL,
+                COMMIT_PROPOSAL,
+                FINAL_PROPOSAL,
+            ],
+            "ImplementationSummaryDraft": [IMPLEMENTATION_SUMMARY_RESPONSE],
+        }
+    )
+    # Only 2 EXECUTED calls allowed, but 2 rejections are tolerated first.
+    # max_rejections=3: strict `<` means rejections=2 (after two invalid
+    # searches) still passes the `2 < 3` check, letting iteration 3 start
+    # and land the valid write+commit.
+    agent = DeveloperAgent(provider, max_tool_calls=2, max_rejections=3)
+
+    summary = run(agent.run(task, step, artifact, ctx_for(db_session, task)))
+
+    assert isinstance(summary, ImplementationSummary)
+    assert summary.commit_sha
+    # The two rejections produced NO audit rows; only write+commit executed.
+    calls = tool_calls_for(db_session, task.id)
+    assert [c.tool_name for c in calls] == ["filesystem.write_file", "git.commit"]
+    assert all(c.status == "EXECUTED" for c in calls)
+    rows = summaries_for(db_session, task.id)
+    assert rows[0].status == "COMPLETE"
+
+
 def test_empty_diff_after_write_handled_gracefully(db_session, repo_task) -> None:
     """Writing content identical to the existing file makes git.commit refuse
     (Phase 4) — the loop must treat that as 'nothing to do', not crash or

@@ -231,7 +231,12 @@ def test_budget_exhaustion_forces_synthesis_without_hanging(
         )
     ).all()
     assert len(logs) == 1
-    assert logs[0].details == {"max_tool_calls": 3}
+    assert logs[0].details == {
+        "executed_tool_calls": 3,
+        "rejections": 0,
+        "max_tool_calls": 3,
+        "max_rejections": 5,
+    }
     assert len(artifacts_for(db_session, task.id)) == 1
 
 

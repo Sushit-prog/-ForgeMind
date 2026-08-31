@@ -176,8 +176,13 @@ class ToolPipeline:
             status=ToolCallStatus.ALLOWED.value,
             risk=tool.risk,
         )
+        # Register the audit row BEFORE execute so the row exists no matter
+        # what execute does, but do NOT flush yet: a flush issues the INSERT
+        # and opens a transaction holding WRITE locks (RowExclusive on
+        # tool_calls, RowShare on tasks) — we must not hold those across the
+        # await below. The flush is deferred to just before the commit,
+        # after execute returns, so no write lock spans the await.
         self.db.add(row)
-        self.db.flush()  # assign id; the audit row must not depend on execute
 
         started = time.perf_counter()
         try:
@@ -187,6 +192,7 @@ class ToolPipeline:
             row.status = ToolCallStatus.FAILED.value
             row.output = {"error": str(exc)}
             row.latency_ms = latency_ms
+            self.db.flush()  # assign id now that execute has returned
             self.db.commit()  # audit row survives whatever the caller does
             logger.error("Tool %s failed after %dms: %s", tool_name, latency_ms, exc)
             return ToolResult(
@@ -200,6 +206,7 @@ class ToolPipeline:
         row.status = ToolCallStatus.EXECUTED.value
         row.output = redact_sensitive(output.model_dump(mode="json"))
         row.latency_ms = latency_ms
+        self.db.flush()  # assign id now that execute has returned
         self.db.commit()
         logger.info("Tool %s executed in %dms", tool_name, latency_ms)
         return ToolResult(

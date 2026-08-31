@@ -220,6 +220,51 @@ def test_invalid_input_error_carries_tool_and_errors(pipeline) -> None:
     assert exc_info.value.errors  # pydantic error list
 
 
+# --- no write lock held across execute ---------------------------------------
+
+
+class LockSpyTool(Tool):
+    """Proves the audit row is NOT yet flushed/visible in the DB during
+    ``execute``. ``db.add(row)`` alone only autobegins the session and issues
+    no SQL — a real WRITE lock (RowExclusive on tool_calls) is only taken by
+    the ``flush`` that issues the INSERT. If the pipeline flushed before the
+    await (the pre-fix behavior) the row would already be queryable during
+    ``execute``; after the fix it is only materialized post-await."""
+
+    name = "test.lock_spy"
+    description = "checks whether the audit row is persisted during execute"
+    input_schema = _Input
+    output_schema = _Output
+    risk = "LOW"
+    persisted_during_execute: bool | None = None
+
+    async def execute(self, input: _Input, ctx: ExecutionContext) -> _Output:
+        n = ctx.db.scalar(
+            select(func.count())
+            .select_from(ToolCall)
+            .where(ToolCall.agent_type == "developer")
+        )
+        LockSpyTool.persisted_during_execute = n > 0
+        return _Output()
+
+
+def test_flush_does_not_open_transaction_across_execute(pipeline, db_session) -> None:
+    """Regression (Fix 4): db.flush() must no longer issue the INSERT (taking
+    a write lock) BEFORE `await tool.execute`. The audit row is db.add()ed
+    pre-execute but only flushed post-execute, so during execute it must NOT
+    yet be visible in the DB."""
+    LockSpyTool.persisted_during_execute = None
+    pipeline.registry = registry_with(LockSpyTool())
+    ctx = ExecutionContext(task_id=uuid.uuid4(), agent_type="developer", db=db_session)
+    result = run(pipeline.invoke("test.lock_spy", {"value": "x"}, set(), ctx))
+    assert result.status == "EXECUTED"
+    assert LockSpyTool.persisted_during_execute is False
+    # The audit row still lands exactly once, EXECUTED.
+    rows = rows_for(db_session, "test.lock_spy")
+    assert len(rows) == 1
+    assert rows[0].status == "EXECUTED"
+
+
 # --- exactly one row per invocation -----------------------------------------
 
 

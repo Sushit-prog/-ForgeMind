@@ -47,6 +47,7 @@ from app.agents.developer.prompt import (
     build_synthesis_messages,
     observation_message,
 )
+from app.agents._budget import Note, ToolBudget
 from app.agents.developer.schema import (
     ImplementationSummary,
     ImplementationSummaryDraft,
@@ -55,7 +56,7 @@ from app.agents.developer.schema import (
     written_paths,
 )
 from app.config import get_settings
-from app.execution import ToolPipeline
+from app.execution import ToolInputValidationError, ToolPipeline
 from app.llm.errors import LLMMalformedOutputError
 from app.llm.provider import LLMProvider, Message
 from app.models import AuditLog
@@ -132,6 +133,7 @@ class DeveloperAgent(Agent):
         provider: LLMProvider,
         *,
         max_tool_calls: int | None = None,
+        max_rejections: int | None = None,
         timeout_retries: int | None = None,
         backoff_base_seconds: float = 0.5,
     ) -> None:
@@ -141,6 +143,11 @@ class DeveloperAgent(Agent):
             settings.max_developer_tool_calls
             if max_tool_calls is None
             else max_tool_calls
+        )
+        self.max_rejections = (
+            settings.max_tool_call_rejections
+            if max_rejections is None
+            else max_rejections
         )
         self.timeout_retries = (
             settings.llm_max_retries if timeout_retries is None else timeout_retries
@@ -174,8 +181,9 @@ class DeveloperAgent(Agent):
         observations: list[Observation] = []
         commit_sha: str | None = None
         committed = False
+        budget = ToolBudget(self.max_tool_calls, self.max_rejections)
 
-        for _ in range(self.max_tool_calls):
+        while budget.should_continue():
             try:
                 proposal: ToolCallProposal = await structured_output_with_retries(
                     self.provider,
@@ -203,6 +211,7 @@ class DeveloperAgent(Agent):
                     self._fail_no_commit(
                         db, task, plan_step, worktree.id, "no_commit_before_final"
                     )
+                budget.note(Note.FINAL)
                 return await self._synthesize(
                     db,
                     task,
@@ -215,9 +224,10 @@ class DeveloperAgent(Agent):
                     forced=False,
                 )
 
-            obs = await self._execute_tool(
+            obs, outcome = await self._execute_tool(
                 proposal.tool_call, worktree.id, db, task.id, committed=committed
             )
+            budget.note(outcome)
             observations.append(obs)
             if obs.status == "EXECUTED" and obs.tool == "git.commit":
                 committed = True
@@ -228,9 +238,12 @@ class DeveloperAgent(Agent):
         # summary (like Research); without one, hard-fail — an implementation
         # with no commit is not a degraded artifact, it is nothing.
         logger.warning(
-            "Developer tool budget (%d) exhausted for task %s (committed=%s) — %s",
-            self.max_tool_calls,
+            "Developer tool run ended for task %s (executed=%d rejections=%d, %s; "
+            "committed=%s) — %s",
             task.id,
+            budget.executed,
+            budget.rejections,
+            budget.exhausted_by_what(),
             committed,
             "forcing synthesis" if committed else "hard failure (no commit)",
         )
@@ -241,7 +254,13 @@ class DeveloperAgent(Agent):
                 action="developer.budget_exhausted",
                 entity_type="task",
                 entity_id=str(task.id),
-                details={"max_tool_calls": self.max_tool_calls, "committed": committed},
+                details={
+                    "executed_tool_calls": budget.executed,
+                    "rejections": budget.rejections,
+                    "max_tool_calls": self.max_tool_calls,
+                    "max_rejections": self.max_rejections,
+                    "committed": committed,
+                },
             )
         )
         db.commit()
@@ -276,8 +295,15 @@ class DeveloperAgent(Agent):
         task_id: uuid.UUID,
         *,
         committed: bool,
-    ) -> Observation:
+    ) -> tuple[Observation, Note]:
         """Run ONE proposal through the pipeline under Developer's capabilities.
+
+        Returns ``(Observation, Note)`` — the second element is the budget
+        accounting: ``Note.EXECUTED`` when ``execute`` actually ran (whether
+        it succeeded or raised), ``Note.REJECTED`` for anything that never
+        reached ``execute`` (validation error, DENY, unknown tool). Returning
+        the note here keeps the budget bookkeeping correct regardless of how
+        the caller classifies the observation.
 
         The worktree_id is injected server-side, as in Research. The
         one-commit contract is enforced HERE, before the pipeline: once the
@@ -300,8 +326,14 @@ class DeveloperAgent(Agent):
                 "developer.post_commit_proposal",
                 {"tool": call.tool, "denial_reason": reason},
             )
-            return Observation(
-                tool=call.tool, status="DENIED", input=tool_input, denial_reason=reason
+            return (
+                Observation(
+                    tool=call.tool,
+                    status="DENIED",
+                    input=tool_input,
+                    denial_reason=reason,
+                ),
+                Note.REJECTED,
             )
 
         ctx = ExecutionContext(task_id=task_id, agent_type=self.name, db=db)
@@ -321,13 +353,38 @@ class DeveloperAgent(Agent):
                 "developer.unexpected_denial",
                 {"tool": call.tool, "surfaced_as": "unknown_tool", "error": str(exc)},
             )
-            return Observation(
-                tool=call.tool, status="FAILED", input=tool_input, error=str(exc)
+            return (
+                Observation(
+                    tool=call.tool, status="FAILED", input=tool_input, error=str(exc)
+                ),
+                Note.REJECTED,
             )
-        except Exception as exc:  # noqa: BLE001 — contract errors surface as FAILED obs
+        except ToolInputValidationError as exc:
+            # Pre-execution schema rejection (e.g. repository.search sent
+            # "pattern" instead of "query"): never executed — costs a REJECTED
+            # allowance, not a real tool-call budget unit.
+            logger.warning(
+                "Developer tool %s invalid input (rejection): %s", call.tool, exc
+            )
+            self._audit(
+                db,
+                task_id,
+                "developer.input_rejected",
+                {"tool": call.tool, "surfaced_as": "invalid_input", "error": str(exc)},
+            )
+            return (
+                Observation(
+                    tool=call.tool, status="FAILED", input=tool_input, error=str(exc)
+                ),
+                Note.REJECTED,
+            )
+        except Exception as exc:  # noqa: BLE001 — pre-execution contract errors
             logger.warning("developer tool %s raised: %s", call.tool, exc)
-            return Observation(
-                tool=call.tool, status="FAILED", input=tool_input, error=str(exc)
+            return (
+                Observation(
+                    tool=call.tool, status="FAILED", input=tool_input, error=str(exc)
+                ),
+                Note.REJECTED,
             )
 
         if result.status == "DENIED":
@@ -350,13 +407,19 @@ class DeveloperAgent(Agent):
                 },
             )
 
-        return Observation(
-            tool=call.tool,
-            status=result.status,
-            input=tool_input,
-            output=result.output,
-            error=result.error,
-            denial_reason=result.denial_reason,
+        outcome = (
+            Note.EXECUTED if result.status in ("EXECUTED", "FAILED") else Note.REJECTED
+        )
+        return (
+            Observation(
+                tool=call.tool,
+                status=result.status,
+                input=tool_input,
+                output=result.output,
+                error=result.error,
+                denial_reason=result.denial_reason,
+            ),
+            outcome,
         )
 
     def _fail_no_commit(self, db, task: Task, plan_step, worktree_id, reason: str):

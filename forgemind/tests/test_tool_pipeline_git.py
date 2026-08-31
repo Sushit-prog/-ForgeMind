@@ -153,6 +153,45 @@ def test_search_executes(worktree_env, db_session) -> None:
     assert [m["path"] for m in result.output["matches"]] == ["tests/test_app.py"]
 
 
+def test_search_accepts_pattern_alias_and_audits_query(
+    worktree_env, db_session
+) -> None:
+    """Regression: real LLM drift proposes ``repository.search`` with
+    ``pattern`` instead of the required ``query`` (~28x in the PostHog run).
+    The alias must succeed AND the audit row must record ``query`` (the
+    canonical field attribute), never leak ``pattern``."""
+    result = run(
+        worktree_env["pipeline"].invoke(
+            "repository.search",
+            {"worktree_id": str(worktree_env["worktree_id"]), "pattern": "assert True"},
+            {"repo.read"},
+            worktree_env["ctx"],
+        )
+    )
+    assert result.status == "EXECUTED"
+    assert [m["path"] for m in result.output["matches"]] == ["tests/test_app.py"]
+    rows = rows_for(db_session, "repository.search")
+    assert len(rows) == 1
+    assert rows[0].status == "EXECUTED"
+    assert rows[0].input["query"] == "assert True"
+    assert "pattern" not in rows[0].input
+
+
+def test_search_accepts_query_and_pattern_together(worktree_env, db_session) -> None:
+    """populate_by_name must keep the CANONICAL ``query`` path working (the
+    researcher prompt documents ``query``) while also accepting ``pattern``."""
+    for key in ("query", "pattern"):
+        result = run(
+            worktree_env["pipeline"].invoke(
+                "repository.search",
+                {"worktree_id": str(worktree_env["worktree_id"]), key: "def test"},
+                {"repo.read"},
+                worktree_env["ctx"],
+            )
+        )
+        assert result.status == "EXECUTED", (key, result)
+
+
 def test_list_files_executes(worktree_env, db_session) -> None:
     result = run(
         worktree_env["pipeline"].invoke(
