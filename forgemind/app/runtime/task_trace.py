@@ -37,6 +37,7 @@ from app.models import (
     TestRun,
     ToolCall,
 )
+from app.runtime.recommendation import recommendation_for
 
 # Terminal states never auto-advance — the trace stops auto-refreshing.
 REFERENCE_TERMINAL = frozenset({"COMPLETED", "ESCALATED", "FAILED"})
@@ -259,6 +260,18 @@ def build_task_trace(db: Session, task: Task) -> dict:
 
     status = task.status
     safe = REFERENCE_TERMINAL
+    # Phase 12: the latest human approval decision + merge state, and the
+    # derived recommendation signal, for the operator control panel.
+    latest_approval = db.scalar(
+        select(Approval)
+        .where(Approval.task_id == task_id)
+        .order_by(Approval.created_at.desc(), Approval.id.desc())
+        .limit(1)
+    )
+    approved = latest_approval is not None and latest_approval.action == "approve"
+    merged = pr is not None and pr.merged_at is not None
+    rec_action, rec_reason = recommendation_for(db, task)
+
     return {
         "task_id": str(task.id),
         "objective": task.objective,
@@ -273,11 +286,16 @@ def build_task_trace(db: Session, task: Task) -> dict:
                 "url": pr.url,
                 "number": pr.number,
                 "status": pr.status,
+                "merge_commit_sha": pr.merge_commit_sha,
             }
             if pr is not None
             else None
         ),
         "show_pr": pr is not None and status in {"AWAITING_APPROVAL", "COMPLETED"},
+        "approved": approved,
+        "merged": merged,
+        "recommended_action": rec_action,
+        "recommendation_reason": rec_reason,
         "terminal_reason": (
             (events[-1].reason or events[-1].to_status)
             if events and status in safe

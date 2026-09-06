@@ -34,10 +34,11 @@ structurally-enforced capability set:
 6. **Verification** — a plain-code staleness check: the reviewed commit must still
    be worktree HEAD with a passing test run.
 7. **GitHub** — the verified branch lands as a real **draft PR on a fork**
-   (`git.push` is the only push in the system, and there is no merge primitive).
+   (`git.push` is the only push in the system; merge is a gated squash-only
+   POST, not a push).
 8. **Human checkpoint** — the task parks in `AWAITING_APPROVAL`; you review the
    draft PR and `approve` (→ COMPLETED) or `reject` (→ FAILED). Merging stays
-   manual on GitHub.
+   manual, initiated via the API (`POST /tasks/{id}/merge`).
 
 ## Architecture
 
@@ -188,7 +189,7 @@ implemented, tested, and wired into the running pipeline:
 - **Phase 9** — Reviewer + Security Agents: independent, blind verdicts plus a
   code-level staleness check.
 - **Phase 10** — GitHub Agent + PR runtime: fork draft PR with a human approval
-  gate; no merge primitive anywhere.
+  gate; a gated squash merge (`POST /tasks/{id}/merge`) was added in Phase 12.
 - **Phase 10.5** — bearer-token auth on all mutating routes.
 - **Phase 11** — the read-only trace viewer.
 

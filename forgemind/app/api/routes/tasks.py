@@ -1,11 +1,12 @@
-"""Task API routes (Phase 1 + Phase 2 contracts, Phase 10.5 auth).
+"""Task API routes (Phase 1 + Phase 2 contracts, Phase 10.5 auth, Phase 12 merge).
 
 POST /tasks                {objective, repository_url} -> 201, enqueues advance_task  [auth]
 GET  /tasks                -> list of tasks                                            [open]
-GET  /tasks/{id}           -> full task record                                          [open]
+GET  /tasks/{id}           -> full task record (+ recommendation)                     [open]
 POST /tasks/{id}/cancel    -> transition to FAILED ("user_cancelled"), enqueues nothing [auth]
 POST /tasks/{id}/approve   -> COMPLETED (human yes at the checkpoint)                   [auth]
 POST /tasks/{id}/reject    -> FAILED (human no at the checkpoint)                       [auth]
+POST /tasks/{id}/merge     -> gated squash-merge of the approved PR                    [auth]
 GET  /tasks/{id}/events    -> execution_events, ordered by created_at                   [open]
 
 Every state-mutating route is gated by the shared bearer token
@@ -13,6 +14,10 @@ Every state-mutating route is gated by the shared bearer token
 to the audit trail — the one place that authorizes real-world side effects
 must not have an author gap. Read routes stay open so a human can watch a task
 walk the pipeline without the token.
+
+The Phase 12 merge endpoint is deliberately separate from approve: approval
+judges the diff/plan/verdicts; merge LANDs it. A task can be approved and
+merged later, or approved and never merged.
 """
 
 from __future__ import annotations
@@ -25,7 +30,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps.auth import TOKEN_HOLDER, require_api_token
+from app.capabilities import capabilities_for_agent
 from app.database.session import get_db
+from app.execution import ToolPipeline
 from app.models import (
     Approval,
     AuditLog,
@@ -35,15 +42,44 @@ from app.models import (
     Task,
     TaskStatus,
 )
+from app.runtime.recommendation import recommendation_for
 from app.runtime.state_machine import TERMINAL_STATES
 from app.runtime.task_lifecycle import USER_CANCELLED, transition_task
 from app.runtime.task_trace import list_execution_events
-from app.schemas import ApprovalRequest, ExecutionEventRead, TaskCreate, TaskRead
+from app.schemas import (
+    ApprovalRequest,
+    ExecutionEventRead,
+    MergeResult,
+    TaskCreate,
+    TaskRead,
+)
+from app.tools.base import ExecutionContext
 from app.worker.queue import enqueue_advance_task
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+
+def _task_read(db: Session, task: Task) -> TaskRead:
+    """Build a ``TaskRead`` with the Phase 12 recommendation signal populated.
+
+    Single-task endpoints (GET /{id}, approve, reject, merge) enrich the
+    response. ``list_tasks`` stays lean — the list view leaves both fields
+    ``None`` to avoid N+1 queries at the operator scale this system targets.
+    """
+    rec_action, rec_reason = recommendation_for(db, task)
+    return TaskRead(
+        id=task.id,
+        objective=task.objective,
+        repository_id=task.repository_id,
+        status=task.status,
+        replan_count=task.replan_count,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        recommended_action=rec_action,
+        recommendation_reason=rec_reason,
+    )
 
 
 def _get_or_create_repository(db: Session, url: str) -> Repository:
@@ -145,12 +181,12 @@ def list_tasks(db: Session = Depends(get_db)) -> list[Task]:
 
 
 @router.get("/{task_id}", response_model=TaskRead)
-def get_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> Task:
-    """Fetch a single task by id."""
+def get_task(task_id: uuid.UUID, db: Session = Depends(get_db)) -> TaskRead:
+    """Fetch a single task by id (with the recommendation signal)."""
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    return task
+    return _task_read(db, task)
 
 
 @router.post(
@@ -268,7 +304,7 @@ def approve_task(
     payload: ApprovalRequest | None = None,
     db: Session = Depends(get_db),
     actor: str = Depends(require_api_token),
-) -> Task:
+) -> TaskRead:
     """The human 'yes' at the AWAITING_APPROVAL checkpoint.
 
     Bearer-token gated. Records an ``approvals`` row (action=approve) and
@@ -288,7 +324,7 @@ def approve_task(
     db.commit()
     db.refresh(task)
     logger.info("Task %s approved by user (AWAITING_APPROVAL -> COMPLETED)", task.id)
-    return task
+    return _task_read(db, task)
 
 
 @router.post("/{task_id}/reject", response_model=TaskRead)
@@ -297,7 +333,7 @@ def reject_task(
     payload: ApprovalRequest | None = None,
     db: Session = Depends(get_db),
     actor: str = Depends(require_api_token),
-) -> Task:
+) -> TaskRead:
     """The human 'no' at the AWAITING_APPROVAL checkpoint.
 
     Bearer-token gated. Records an ``approvals`` row (action=reject) and
@@ -317,7 +353,128 @@ def reject_task(
     db.commit()
     db.refresh(task)
     logger.info("Task %s rejected by user (AWAITING_APPROVAL -> FAILED)", task.id)
-    return task
+    return _task_read(db, task)
+
+
+# -- Phase 12: gated squash merge --------------------------------------------
+
+
+@router.post("/{task_id}/merge", response_model=MergeResult)
+async def merge_task(
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    actor: str = Depends(require_api_token),
+) -> MergeResult:
+    """Gated squash-merge of the task's approved draft PR.
+
+    Bearer-token gated. Returns ``merged=True`` + merge-commit SHA on
+    success, or ``merged=False`` + a specific ``denial_reason`` for
+    business-logic failures (not approved, repo not allowlisted, stale PR,
+    already merged, or a GitHub API error).
+
+    The ONLY precondition the endpoint enforces itself is approval: the task
+    must have an ``approvals`` row with ``action="approve"`` (checked
+    independently of the tool for defense in depth). All other gates — repo
+    allowlist, staleness check, actual merge — are enforced inside the
+    ``github.merge_pr`` tool through the pipeline, preserving the
+    ``validate → capability → policy → execute → audit`` contract.
+
+    The tool returns structured output for business denials (EXECUTED with
+    ``merged=False``) rather than raising; the endpoint writes an
+    ``AuditLog`` row in all three outcomes (merged / denied / failed) to
+    keep the audit trail complete. HTTP status is always 200 except for
+    the precondition error (409 when not approved), matching the pre-existing
+    approve/reject pattern.
+    """
+    # 1. Row-lock + 404 — same pattern as approve/reject.
+    task = db.execute(
+        select(Task).where(Task.id == task_id).with_for_update()
+    ).scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # 2. Precondition: must already be approved (409 if not).
+    latest_approval = db.scalar(
+        select(Approval)
+        .where(Approval.task_id == task.id)
+        .order_by(Approval.created_at.desc(), Approval.id.desc())
+        .limit(1)
+    )
+    if latest_approval is None or latest_approval.action != "approve":
+        raise HTTPException(
+            status_code=409,
+            detail=("task not approved — call POST /tasks/{id}/approve first"),
+        )
+
+    # 3. Invoke github.merge_pr through the full pipeline (no shortcuts).
+    ctx = ExecutionContext(task_id=task.id, agent_type="github", db=db)
+    caps = set(capabilities_for_agent("github"))
+    result = await ToolPipeline(db).invoke(
+        "github.merge_pr",
+        {"task_id": str(task.id)},
+        caps,
+        ctx,
+    )
+
+    if result.status == "EXECUTED" and result.output is not None:
+        merged_flag = result.output.get("merged")
+        merge_sha = result.output.get("merge_commit_sha")
+        denial = result.output.get("denial_reason")
+        pr_number = result.output.get("pr_number")
+        repo = result.output.get("repo")
+
+        if merged_flag:
+            db.add(
+                AuditLog(
+                    task_id=task.id,
+                    actor=actor,
+                    action="task.merged",
+                    entity_type="pull_request",
+                    entity_id=str(pr_number) if pr_number else None,
+                    details={
+                        "merge_commit_sha": merge_sha,
+                        "repo": repo,
+                        "pr_number": pr_number,
+                    },
+                )
+            )
+        else:
+            db.add(
+                AuditLog(
+                    task_id=task.id,
+                    actor=actor,
+                    action="task.merge_denied",
+                    entity_type="task",
+                    entity_id=str(task.id),
+                    details={"reason": denial},
+                )
+            )
+    else:
+        # Pipeline FAILED (GitHub API error — raises → pipeline records FAILED).
+        db.add(
+            AuditLog(
+                task_id=task.id,
+                actor=actor,
+                action="task.merge_failed",
+                entity_type="task",
+                entity_id=str(task.id),
+                details={"error": result.error or "unknown"},
+            )
+        )
+
+    db.commit()
+
+    merged_flag = bool(result.output.get("merged") is True) if result.output else False
+    return MergeResult(
+        merged=merged_flag,
+        merge_commit_sha=(
+            result.output.get("merge_commit_sha") if result.output else None
+        ),
+        denial_reason=(
+            (result.output.get("denial_reason") if result.output else None)
+            or result.error
+        ),
+    )
 
 
 @router.get("/{task_id}/events", response_model=list[ExecutionEventRead])

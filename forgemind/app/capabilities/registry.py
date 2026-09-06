@@ -30,9 +30,19 @@ AGENT_CAPABILITIES: dict[str, frozenset[Capability]] = {
     "security": frozenset({Capability.REPO_READ, Capability.GIT_READ}),
     # The GitHub Agent (Phase 10) must push the worktree branch and create
     # the PR, so it holds git.write (the push tool) + both github caps.
-    # Notably there is NO github.merge capability in this domain at all.
+    # Phase 12 adds github.merge: the gated ``github.merge_pr`` tool the
+    # operator-facing ``POST /tasks/{id}/merge`` endpoint invokes (squash-
+    # merge into an allowlisted fork, never the upstream). Every OTHER gate
+    # the capability requires — approval evidence, MERGE_ALLOWED_REPOS, and
+    # the fresh staleness check — is enforced INSIDE the tool, so the
+    # capability alone can never merge into an arbitrary repo.
     "github": frozenset(
-        {Capability.GITHUB_READ, Capability.GITHUB_WRITE, Capability.GIT_WRITE}
+        {
+            Capability.GITHUB_READ,
+            Capability.GITHUB_WRITE,
+            Capability.GITHUB_MERGE,
+            Capability.GIT_WRITE,
+        }
     ),
 }
 

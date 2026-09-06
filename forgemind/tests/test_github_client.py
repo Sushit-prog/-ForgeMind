@@ -191,3 +191,99 @@ def test_find_open_pr_reuses_existing() -> None:
 def test_no_token_raises_at_construction() -> None:
     with pytest.raises(GitHubAuthError):
         GitHubClient("")
+
+
+# --- Phase 12: get_pr / merge_pr --------------------------------------------
+
+
+def test_get_pr_returns_current_state_and_base_sha() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/repos/fork/repo/pulls/7"
+        return httpx.Response(
+            200,
+            json={
+                "number": 7,
+                "state": "open",
+                "html_url": "https://github.com/fork/repo/pull/7",
+                "mergeable": True,
+                "mergeable_state": "clean",
+                "draft": False,
+                "head": {"ref": "agent/task-1", "sha": "head-abc"},
+                "base": {"ref": "main", "sha": "base-def"},
+                "merged": False,
+            },
+        )
+
+    pr = run(make_client(handler).get_pr("fork", "repo", 7))
+    assert pr.number == 7
+    assert pr.state == "open"
+    assert pr.mergeable is True
+    assert pr.mergeable_state == "clean"
+    assert pr.head_sha == "head-abc"
+    assert pr.base_sha == "base-def"
+    assert pr.base_ref == "main"
+    assert pr.merged is False
+
+
+def test_create_pr_captures_base_sha() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            201,
+            json={
+                "number": 8,
+                "html_url": "https://github.com/fork/repo/pull/8",
+                "draft": True,
+                "state": "open",
+                "base": {"ref": "main", "sha": "base-123"},
+            },
+        )
+
+    pr = run(
+        make_client(handler).create_pr(
+            "fork", "repo", head="agent/task-1", base="main", title="t", body="b"
+        )
+    )
+    assert pr.base_sha == "base-123"
+    assert pr.base_ref == "main"
+
+
+def test_merge_pr_puts_squash_and_returns_sha() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = request.url.path
+        captured["json"] = request.read()
+        return httpx.Response(200, json={"merged": True, "sha": "merge-abc"})
+
+    sha = run(make_client(handler).merge_pr("fork", "repo", 7, merge_method="squash"))
+    assert sha == "merge-abc"
+    import json
+
+    payload = json.loads(captured["json"])
+    assert payload == {"merge_method": "squash"}
+    assert captured["method"] == "PUT"
+    assert captured["url"] == "/repos/fork/repo/pulls/7/merge"
+
+
+def test_merge_pr_no_sha_is_fail_closed() -> None:
+    """A 200 without a sha is impossible from GitHub's real API, but if it
+    ever happens the tool must NOT pretend the merge happened."""
+    from app.github.errors import GitHubError
+
+    client = make_client(lambda req: httpx.Response(200, json={"merged": True}))
+    with pytest.raises(GitHubError):
+        run(client.merge_pr("fork", "repo", 7, merge_method="squash"))
+
+
+def test_merge_pr_non_mergeable_405_is_error() -> None:
+    from app.github.errors import GitHubError
+
+    client = make_client(
+        lambda req: httpx.Response(405, text="Pull request is not mergeable")
+    )
+    with pytest.raises(GitHubError):
+        run(client.merge_pr("fork", "repo", 7, merge_method="squash"))

@@ -1,4 +1,4 @@
-"""The GitHub Agent (architecture doc section E, Phase 10).
+"""The GitHub Agent (architecture doc section E, Phase 10 + Phase 12).
 
 The phase's finishing agent — DETERMINISTIC, not a tool-use loop (the Test
 Agent pattern): it pushes the worktree branch to the fork, opens a DRAFT PR
@@ -15,10 +15,17 @@ exactly like any other tool call:
 1. ``git.push``           — force-push the worktree branch to the fork
                             (skipped under ``FORGEMIND_MOCK_GITHUB=1``; the
                             real push is covered by its own runtime tests).
-2. ``github.create_pr``   — draft PR, target resolved server-side.
+2. ``github.create_pr``   — draft PR, target resolved server-side; the base
+                            branch SHA is captured and persisted so the
+                            Phase 12 merge staleness check has a reference.
 3. ``github.comment_issue``— PR link on the source issue, if any; a comment
                             failure NEVER fails the task (the PR exists; the
                             comment is annotation) — audited instead.
+
+The agent's capability set also carries ``github.merge`` so the registry
+set and the declared set stay identical — but the DETERMINISTIC agent never
+invokes ``github.merge_pr`` (it is only reachable through the operator
+endpoint ``POST /tasks/{id}/merge``).
 
 A failure at push or create_pr raises ``GitHubAgentError`` and the task goes
 FAILED at PR_CREATION. A failure to persist the PR row is likewise a hard
@@ -54,8 +61,16 @@ class GitHubAgent(Agent):
         "whose body is assembled from the persisted artifacts."
     )
     # Write-capable along exactly one axis: the fork (push + PR) and the
-    # source-issue comment. There is no github.merge capability anywhere.
-    capabilities: ClassVar[list[str]] = ["github.read", "github.write", "git.write"]
+    # source-issue comment. Phase 12 adds github.merge: the capability stays
+    # in the declared set (keeping the invariant "declared == registry set")
+    # but this DETERMINISTIC agent never invokes merge_pr — it is only
+    # reachable through the operator endpoint POST /tasks/{id}/merge.
+    capabilities: ClassVar[list[str]] = [
+        "github.read",
+        "github.write",
+        "github.merge",
+        "git.write",
+    ]
 
     async def run(self, task: Task, ctx: ExecutionContext) -> PullRequest:
         """Drive PR_CREATION: push -> create draft PR -> comment -> persist."""
@@ -134,6 +149,7 @@ class GitHubAgent(Agent):
             number=int(out.get("number") or 0),
             url=out.get("url", ""),
             status="draft",
+            base_sha=out.get("base_sha"),
         )
         if not pr.repo or not pr.url or pr.number < 1:
             raise GitHubAgentError(
@@ -146,6 +162,7 @@ class GitHubAgent(Agent):
             number=pr.number,
             url=pr.url,
             status=pr.status,
+            base_sha=pr.base_sha,
         )
         db.add(row)
         db.commit()

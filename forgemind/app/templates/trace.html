@@ -6,56 +6,87 @@
   <title>Task {{ task_id[:8] }} — ForgeMind trace</title>
   {% if auto_refresh %}<meta http-equiv="refresh" content="5">{% endif %}
   <style>
-    :root { --border:#d8dee6; --muted:#6b7684; --bg:#f7f9fb; --card:#fff; }
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-           margin:0; background:var(--bg); color:#1c2430; }
-    .wrap { max-width:880px; margin:0 auto; padding:24px 16px 64px; }
-    header { background:var(--card); border:1px solid var(--border); border-radius:10px;
-             padding:20px 22px; margin-bottom:18px; }
-    header h1 { margin:0 0 6px; font-size:20px; line-height:1.35; }
-    .meta { color:var(--muted); font-size:13px; }
-    .status { display:inline-block; font-size:12px; font-weight:600; padding:2px 10px;
-              border-radius:999px; background:#eef2ff; color:#3448a0; margin-top:8px; }
-    .banner { border-radius:8px; padding:10px 14px; margin-bottom:18px; font-size:14px; }
-    .banner.pr { background:#eafaf0; border:1px solid #bfe8cd; }
-    .banner.pr a { color:#12663f; font-weight:600; }
-    .banner.fail { background:#fdecec; border:1px solid #f3c1c1; color:#8c2f2f; }
-    .card { background:var(--card); border:1px solid var(--border); border-radius:10px;
+    :root {
+      --bg:#0A0F08; --panel:#0E140C; --border:#1F2A18;
+      --accent:#8AFF57; --accent2:#CAFF3C; --muted:#5F7357;
+      --text:#D8F5CC; --danger:#FF5F57; --warn:#FFC53C; --ok:#3DDC84;
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text);
+           font-family:ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace; font-size:13px; }
+    .wrap { max-width:920px; margin:0 auto; padding:24px 16px 64px; }
+    header { border:1px solid var(--border); border-radius:8px; background:var(--panel);
+             padding:18px 20px; margin-bottom:18px; }
+    header h1 { margin:0 0 8px; font-size:16px; color:var(--accent2); line-height:1.35;
+                font-weight:600; }
+    .meta { color:var(--muted); font-size:12px; }
+    .meta code { color:var(--text); }
+    .status { display:inline-block; font-size:11px; font-weight:700; padding:2px 9px;
+              border-radius:3px; margin-top:8px; letter-spacing:.04em;
+              background:#13240E; color:var(--accent); border:1px solid #24401A; }
+    .banner { border-radius:6px; padding:10px 14px; margin-bottom:16px; font-size:13px;
+              border:1px solid var(--border); background:var(--panel); }
+    .banner.pr { border-color:#2C5A1E; }
+    .banner.pr a { color:var(--accent); font-weight:600; text-decoration:none; }
+    .banner.fail { border-color:#5A1E1E; color:var(--danger); }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:8px;
             padding:16px 20px; margin-bottom:18px; }
-    .card h2 { margin:0 0 10px; font-size:14px; text-transform:uppercase;
-               letter-spacing:.04em; color:var(--muted); }
+    .card h2 { margin:0 0 12px; font-size:11px; text-transform:uppercase;
+               letter-spacing:.1em; color:var(--muted); font-weight:700; }
+
+    /* Operator control panel (Phase 12) */
+    .rec { margin-bottom:12px; font-size:13px; }
+    .rec .tag { display:inline-block; font-weight:700; letter-spacing:.05em;
+                padding:1px 8px; border-radius:3px; margin-right:8px; }
+    .rec .tag.merge { background:#13240E; color:var(--accent); border:1px solid #2C5A1E; }
+    .rec .tag.hold  { background:#241B0E; color:var(--warn);  border:1px solid #5A431E; }
+    .token { width:100%; padding:8px 10px; margin:8px 0 12px; background:#07090A;
+             color:var(--accent2); border:1px solid var(--border); border-radius:4px;
+             font-family:inherit; font-size:12px; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; }
+    button { font-family:inherit; font-size:12px; font-weight:700; letter-spacing:.05em;
+             padding:9px 16px; border-radius:4px; cursor:pointer; border:1px solid var(--border);
+             background:#13240E; color:var(--accent); }
+    button:hover:not(:disabled) { border-color:var(--accent); }
+    button:disabled { opacity:.35; cursor:not-allowed; }
+    button.merge { border-color:#2C5A1E; }
+    button.merge:not(:disabled) { background:#16300F; }
+    .result { margin-top:12px; background:#07090A; border:1px solid var(--border);
+              border-radius:4px; padding:10px 12px; white-space:pre-wrap; overflow-wrap:anywhere;
+              font-size:12px; color:var(--text); }
+    .hint { color:var(--muted); font-size:11px; margin-top:6px; }
+
     ul.timeline { list-style:none; margin:0; padding:0; }
-    ul.timeline li { display:flex; gap:12px; padding:10px 0; border-bottom:1px solid #eef1f5; }
+    ul.timeline li { display:flex; gap:14px; padding:10px 0; border-bottom:1px solid #1A2414; }
     ul.timeline li:last-child { border-bottom:none; }
-    .ts { flex:0 0 150px; color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+    .ts { flex:0 0 150px; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
     .body { flex:1; min-width:0; }
-    .body .label { font-size:14px; font-weight:600; }
-    .body .detail { font-size:13px; color:#3c4654; margin-top:2px; overflow-wrap:anywhere; }
-    .badge { display:inline-block; font-size:11px; font-weight:700; text-transform:uppercase;
-             letter-spacing:.03em; padding:1px 7px; border-radius:4px; margin-right:8px; }
-    .badge.transition{ background:#eef1f5; color:#46505e; }
-    .badge.plan     { background:#eef2ff; color:#3448a0; }
-    .badge.tool     { background:#fff2e5; color:#92510c; }
-    .badge.test     { background:#eaf7ec; color:#1d7a37; }
-    .badge.review   { background:#f3e8ff; color:#6a37a8; }
-    .badge.security { background:#fdecec; color:#8c2f2f; }
-    .badge.pr       { background:#e0f3fa; color:#0f5c7a; }
-    .badge.research { background:#eef7ff; color:#17507c; }
-    .badge.implement{ background:#e7f4e7; color:#256025; }
-    .badge.human    { background:#fdf3d7; color:#7a5c0f; }
-    .steps { width:100%; border-collapse:collapse; font-size:13px; }
-    .steps th, .steps td { text-align:left; padding:6px 8px; border-bottom:1px solid #eef1f5; }
+    .body .label { font-size:13px; font-weight:600; }
+    .body .detail { font-size:12px; color:#A9CBA0; margin-top:2px; overflow-wrap:anywhere; }
+    .badge { display:inline-block; font-size:10px; font-weight:700; text-transform:uppercase;
+             letter-spacing:.05em; padding:1px 6px; border-radius:3px; margin-right:8px; }
+    .badge.transition{ background:#20261C; color:#9AA88F; }
+    .badge.plan     { background:#16233A; color:#7FB2FF; }
+    .badge.tool     { background:#2C1F0F; color:#FFB054; }
+    .badge.test     { background:#10261A; color:#3DDC84; }
+    .badge.review   { background:#231233; color:#C77DFF; }
+    .badge.security { background:#2C1212; color:#FF7B7B; }
+    .badge.pr       { background:#0E2330; color:#56CCF2; }
+    .badge.research { background:#0E1A2C; color:#5FA8FF; }
+    .badge.implement{ background:#0F2A1A; color:#50E3A1; }
+    .badge.human    { background:#2C240E; color:#FFE066; }
+    .steps { width:100%; border-collapse:collapse; font-size:12px; }
+    .steps th, .steps td { text-align:left; padding:6px 8px; border-bottom:1px solid #1A2414; }
     .steps th { color:var(--muted); font-weight:600; }
-    .empty { padding:18px; color:var(--muted); font-size:14px; }
-    code { background:#eef1f5; padding:1px 5px; border-radius:4px; font-size:12px; }
-    @media (max-width:560px){ .ts { flex-basis:110px; } }
+    .empty { padding:18px; color:var(--muted); font-size:13px; }
+    code { background:#1A2414; padding:1px 5px; border-radius:3px; font-size:11px; }
+    @media (max-width:560px){ .ts { flex-basis:105px; } }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
-      <h1>{{ objective }}</h1>
+      <h1>&gt; {{ objective }}</h1>
       <div class="meta">
         Task <code>{{ task_id }}</code>
         &middot; repo <code>{{ repository_url }}</code>
@@ -72,14 +103,35 @@
 
     {% if show_pr and pr %}
     <div class="banner pr">
-      Waiting on the human checkpoint &mdash; review the draft PR:
-      <a href="{{ pr.url }}" rel="noopener" target="_blank">#{{ pr.number }} ({{ pr.status }})</a>
+      {% if merged %}
+        Merged as <code>{{ pr.merge_commit_sha }}</code> — <a href="{{ pr.url }}" rel="noopener" target="_blank">#{{ pr.number }}</a>
+      {% else %}
+        {% if approved %}Approved — wait{% else %}Waiting{% endif %} on the human checkpoint &mdash; review the draft PR:
+        <a href="{{ pr.url }}" rel="noopener" target="_blank">#{{ pr.number }} ({{ pr.status }})</a>
+      {% endif %}
     </div>
     {% endif %}
 
     {% if terminal_reason %}
     <div class="banner fail">
       <strong>{{ status }}:</strong> {{ terminal_reason }}
+    </div>
+    {% endif %}
+
+    {% if show_pr and pr %}
+    <div class="card">
+      <h2>Operator control</h2>
+      <div class="rec">
+        <span class="tag {{ recommended_action }}">recommend: {{ recommended_action or "hold" }}</span>
+        {{ recommendation_reason or "No verdicts yet." }}
+      </div>
+      <input class="token" type="password" id="forgemindToken" placeholder="bearer token (FORGEMIND_API_TOKEN)" autocomplete="off">
+      <div class="actions">
+        <button id="btnApprove" {% if status != "AWAITING_APPROVAL" or approved %}disabled title="{% if approved %}This task is already approved{% else %}Only enabled when the task is AWAITING_APPROVAL{% endif %}"{% endif %}>Approve</button>
+        <button id="btnMerge" class="merge" {% if not (approved and not merged) %}disabled title="{% if not approved %}Approve the task before merging (POST /approve){% else %}{% if merged %}This task's PR is already merged{% else %}Requires an approved task (approve first){% endif %}{% endif %}"{% endif %}>Merge (squash)</button>
+      </div>
+      <div class="result" id="mergeResult" style="display:none"></div>
+      <div class="hint">Token is held only in this page's memory for the session (Authorization header) — never persisted. Merge calls POST /tasks/{{ task_id[:8] }}/merge.</div>
     </div>
     {% endif %}
 
@@ -124,5 +176,40 @@
       {% endif %}
     </div>
   </div>
+
+  <script>
+    (function () {
+      const taskId = {{ task_id|tojson }};
+      const tokenInput = document.getElementById("forgemindToken");
+      const resultBox = document.getElementById("mergeResult");
+      const approveBtn = document.getElementById("btnApprove");
+      const mergeBtn = document.getElementById("btnMerge");
+
+      function showResult(text) {
+        resultBox.style.display = "block";
+        resultBox.textContent = text;
+      }
+
+      async function post(path) {
+        const token = tokenInput ? tokenInput.value.trim() : "";
+        const headers = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = "Bearer " + token;
+        const resp = await fetch("/tasks/" + taskId + path, {
+          method: "POST",
+          headers: headers,
+        });
+        let body = "";
+        try { body = await resp.text(); } catch (e) { body = ""; }
+        return "HTTP " + resp.status + "\n" + body;
+      }
+
+      if (approveBtn) approveBtn.addEventListener("click", function () {
+        post("/approve").then(showResult);
+      });
+      if (mergeBtn) mergeBtn.addEventListener("click", function () {
+        post("/merge").then(showResult);
+      });
+    })();
+  </script>
 </body>
 </html>

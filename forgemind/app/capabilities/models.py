@@ -22,6 +22,7 @@ class Capability(str, enum.Enum):
     SHELL_BUILD = "shell.build"
     GITHUB_READ = "github.read"
     GITHUB_WRITE = "github.write"
+    GITHUB_MERGE = "github.merge"
 
     def __str__(self) -> str:  # ergonomic: str(Capability.REPO_READ) == "repo.read"
         return self.value

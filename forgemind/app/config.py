@@ -334,6 +334,27 @@ class Settings(BaseSettings):
         description="Bounded transient (429/5xx/timeout) retries per GitHub call.",
     )
 
+    # Phase 12 — Merge gate. Comma-separated ``owner/repo`` fork slugs
+    # ForgeMind is permitted to merge into. Empty/unset means merge is
+    # disabled everywhere (fail-closed: the merge tool always returns
+    # ``merged=False`` with ``"repo not in MERGE_ALLOWED_REPOS"``).
+    merge_allowed_repos: str = Field(
+        default="",
+        description=(
+            "Comma-separated owner/repo fork slugs with merge permission "
+            "(env: MERGE_ALLOWED_REPOS). Empty = merge disabled everywhere."
+        ),
+    )
+
+    @property
+    def merge_allowed_repo_set(self) -> frozenset[str]:
+        """Normalized, lowercased, whitespace-stripped set of allowed slugs."""
+        return frozenset(
+            entry.strip().lower()
+            for entry in self.merge_allowed_repos.split(",")
+            if entry.strip()
+        )
+
     @model_validator(mode="after")
     def _ensure_api_token(self) -> "Settings":
         """Fail closed: no API runs in production without an explicit token.

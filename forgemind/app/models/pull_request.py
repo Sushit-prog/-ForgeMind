@@ -1,11 +1,22 @@
-"""PullRequest model (architecture doc section G, Phase 10).
+"""PullRequest model (architecture doc section G, Phase 10 + Phase 12).
 
 Persists the draft PR the GitHub Agent opened on the FORK:
 ``repo`` is always the fork slug (e.g. ``sushit-prog/pydantic-ai``), never
 the upstream reference. ``status`` starts ``draft`` (the agent always opens
 a draft) and moves on to ``awaiting_approval``/``approved``/``rejected``
-as the human checkpoint progresses — but the row itself is append-only: it
-records what was actually created, not what a future phase might merge.
+as the human checkpoint progresses.
+
+Phase 12 adds the merge state, set ONLY by the gated ``github.merge_pr``
+tool after a human has approved the task:
+
+- ``base_sha`` — the base branch SHA captured when the PR was created. The
+  pre-merge staleness check (VERIFICATION's pattern: persisted reference vs
+  freshly re-fetched truth) compares it against the PR's CURRENT base SHA,
+  so a rebase-requiring change to the base branch is detected, not assumed.
+- ``merged_at`` / ``merge_commit_sha`` — set atomically by a successful
+  squash merge. A task can be ``COMPLETED`` with these unset (approved,
+  never merged) or set (approved, then merged) — there is no ``MERGED``
+  terminal state.
 """
 
 from __future__ import annotations
@@ -38,6 +49,12 @@ class PullRequest(Base):
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    # Phase 12 merge state (set only by github.merge_pr, post-approval).
+    base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    merged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    merge_commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

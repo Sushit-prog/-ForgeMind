@@ -1,8 +1,8 @@
-"""Thin GitHub REST API wrapper (architecture doc section F, Phase 10).
+"""Thin GitHub REST API wrapper (architecture doc section F, Phase 10 + 12).
 
-Covers exactly the four operations this phase needs — read an issue, find
-an existing open PR for a branch (idempotency), create a draft PR, comment
-on an issue. There is deliberately NO merge method.
+Covers exactly the operations this system needs — read an issue, find an
+existing open PR for a branch (idempotency), create a draft PR, comment on
+an issue, and Phase 12's GATED squash merge (``get_pr`` + ``merge_pr``).
 
 Auth + safety rules:
 
@@ -16,6 +16,10 @@ Auth + safety rules:
   a silent no-op.
 - Every method is server-side-resolved by the caller from repository
   rows; the client itself never guesses a target.
+- ``merge_pr`` exists ONLY as a building block for the gated
+  ``github.merge_pr`` tool. Nothing calls it except that tool, and the tool
+  enforces approval evidence, MERGE_ALLOWED_REPOS, and a fresh staleness
+  check before it is ever reached.
 """
 
 from __future__ import annotations
@@ -67,6 +71,11 @@ class PRData(BaseModel):
     the upstream reference never appears here. ``status`` is the GitHub
     PR state: ``draft`` when we created it (always) or ``open`` for an
     existing PR we reused.
+
+    Phase 12 adds the merge-check inputs: ``state`` (open/closed), GitHub's
+    own ``mergeable`` / ``mergeable_state``, the head/base SHAs, and the
+    base SHA at PR-open time (``base_sha``) that the fresh staleness check
+    compares against. All optional so existing constructions keep working.
     """
 
     repo: str
@@ -75,6 +84,12 @@ class PRData(BaseModel):
     url: str
     status: str = Field(default="draft")
     base_ref: str | None = None
+    state: str | None = None
+    mergeable: bool | None = None
+    mergeable_state: str | None = None
+    head_sha: str | None = None
+    base_sha: str | None = None
+    merged: bool | None = None
 
 
 class GitHubClient:
@@ -227,6 +242,12 @@ class GitHubClient:
                     url=item["html_url"],
                     status="open",
                     base_ref=(item.get("base") or {}).get("ref"),
+                    state=item.get("state"),
+                    mergeable=item.get("mergeable"),
+                    mergeable_state=item.get("mergeable_state"),
+                    head_sha=(head.get("sha") if head else None),
+                    base_sha=((item.get("base") or {}).get("sha")),
+                    merged=item.get("merged"),
                 )
         return None
 
@@ -275,6 +296,12 @@ class GitHubClient:
                 url=data["html_url"],
                 status="draft" if data.get("draft") else "open",
                 base_ref=(data.get("base") or {}).get("ref"),
+                state=data.get("state"),
+                mergeable=data.get("mergeable"),
+                mergeable_state=data.get("mergeable_state"),
+                head_sha=((data.get("head") or {}).get("sha")),
+                base_sha=(data.get("base") or {}).get("sha"),
+                merged=data.get("merged"),
             )
         except (KeyError, TypeError) as exc:
             raise GitHubError(f"unexpected GitHub PR payload: {exc}") from exc
@@ -292,6 +319,57 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/issues/{number}/comments",
             json_body={"body": body},
         )
+
+    # -- Phase 12: gated merge ------------------------------------------------
+
+    async def get_pr(self, owner: str, repo: str, number: int) -> PRData:
+        """Fetch the PR's CURRENT state from GitHub (the fresh source of truth
+        for the pre-merge staleness check — never the cached DB row)."""
+        resp = await self._request("GET", f"/repos/{owner}/{repo}/pulls/{number}")
+        data = resp.json()
+        try:
+            return PRData(
+                repo=f"{owner}/{repo}",
+                branch=((data.get("head") or {}).get("ref") or ""),
+                number=data["number"],
+                url=data["html_url"],
+                status="draft" if data.get("draft") else data.get("state", "open"),
+                base_ref=(data.get("base") or {}).get("ref"),
+                state=data.get("state"),
+                mergeable=data.get("mergeable"),
+                mergeable_state=data.get("mergeable_state"),
+                head_sha=((data.get("head") or {}).get("sha")),
+                base_sha=(data.get("base") or {}).get("sha"),
+                merged=data.get("merged"),
+            )
+        except (KeyError, TypeError) as exc:
+            raise GitHubError(f"unexpected GitHub PR payload: {exc}") from exc
+
+    async def merge_pr(
+        self, owner: str, repo: str, number: int, *, merge_method: str = "squash"
+    ) -> str:
+        """Squash-merge the PR into its base branch; return the merge commit SHA.
+
+        Only reached through the gated ``github.merge_pr`` tool — the tool
+        verifies approval evidence, MERGE_ALLOWED_REPOS, and a fresh
+        staleness check BEFORE calling this. A non-mergeable PR (405/409 or
+        any >= 400) raises ``GitHubError`` and the tool records it as a
+        failed merge.
+        """
+        resp = await self._request(
+            "PUT",
+            f"/repos/{owner}/{repo}/pulls/{number}/merge",
+            json_body={"merge_method": merge_method},
+        )
+        data = resp.json()
+        sha = data.get("sha") if isinstance(data, dict) else None
+        if not sha:
+            raise GitHubError(
+                f"GitHub merge of {owner}/{repo}#{number} returned no sha: "
+                f"{resp.text[:300]}"
+            )
+        logger.info("Merged %s/%s#%s (squash, sha=%s)", owner, repo, number, sha)
+        return sha
 
 
 def _retry_after_seconds(resp: httpx.Response) -> float | None:

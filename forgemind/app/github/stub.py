@@ -1,4 +1,4 @@
-"""Deterministic stub GitHub client (tests / key-less dev, Phase 10).
+"""Deterministic stub GitHub client (tests / key-less dev, Phase 10 + 12).
 
 The ``FORGEMIND_MOCK_GITHUB=1`` analogue of ``llm/mock.py``: records every
 call, serves deterministic PR/issue data, and implements the SAME
@@ -8,6 +8,11 @@ real. No network, no token.
 
 Only the REST API is stubbed here. ``git.push`` is still exercised for REAL
 against a local fork in tests — the stub never touches the git binary.
+
+Phase 12 adds ``get_pr`` (fresh PR state, the merge staleness source of
+truth) and ``merge_pr`` (squash merge, marks the stub PR merged with a
+deterministic SHA). Test hooks let tests flip ``mergeable`` and ``base_sha``
+so staleness can be exercised without the network.
 """
 
 from __future__ import annotations
@@ -26,12 +31,20 @@ class StubGitHubClient:
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self._prs: dict[tuple[str, str, str], PRData] = {}
+        self._by_number: dict[tuple[str, str, int], PRData] = {}
         # seeded issues: (owner, repo, number) -> IssueData. Unseeded
         # lookups return a deterministic default (never raise), so tests
         # that don't care about the issue can just call get_issue.
         self._issues: dict[tuple[str, str, int], IssueData] = {}
         self.comments: list[dict] = []
         self._next_number = 1
+        # Phase 12 test hooks: flip mergeable/base_sha per PR without a
+        # round-trip to the network.  ``_override_base_sha`` is keyed by
+        # ``(owner, repo, number)`` and, when present, replaces the base_sha
+        # stored by ``create_pr`` so a pre-merge staleness check can be
+        # exercised without touching the DB row.
+        self._override_mergeable: dict[tuple[str, str, int], bool] = {}
+        self._override_base_sha: dict[tuple[str, str, int], str] = {}
 
     def seed_issue(
         self,
@@ -108,6 +121,7 @@ class StubGitHubClient:
             return existing
         number = self._next_number
         self._next_number += 1
+        base_sha = f"stub-base-{base}-{number}"
         pr = PRData(
             repo=f"{owner}/{repo}",
             branch=head,
@@ -115,8 +129,15 @@ class StubGitHubClient:
             url=f"https://github.com/{owner}/{repo}/pull/{number}",
             status="draft",
             base_ref=base,
+            state="draft",
+            mergeable=True,
+            mergeable_state="clean",
+            head_sha=f"stub-head-{number}",
+            base_sha=base_sha,
+            merged=False,
         )
         self._prs[(owner, repo, head)] = pr
+        self._by_number[(owner, repo, number)] = pr
         return pr
 
     async def comment_on_issue(
@@ -132,3 +153,51 @@ class StubGitHubClient:
         self.comments.append(
             {"owner": owner, "repo": repo, "number": number, "body": body}
         )
+
+    # -- Phase 12: get_pr / merge_pr -----------------------------------------
+
+    async def get_pr(self, owner: str, repo: str, number: int) -> PRData:
+        """Fresh PR state (the stub's source of truth for the staleness check)."""
+        self.calls.append(
+            {"op": "get_pr", "owner": owner, "repo": repo, "number": number}
+        )
+        key = (owner, repo, number)
+        pr = self._by_number.get(key)
+        if pr is None:
+            raise GitHubNotFoundError(f"stub: PR {owner}/{repo}#{number} not found")
+        # Apply test hooks (flip mergeable/base_sha from outside).
+        merged_key = key
+        if merged_key in self._override_mergeable:
+            pr = pr.model_copy(
+                update={"mergeable": self._override_mergeable[merged_key]}
+            )
+        if merged_key in self._override_base_sha:
+            pr = pr.model_copy(update={"base_sha": self._override_base_sha[merged_key]})
+        return pr
+
+    async def merge_pr(
+        self, owner: str, repo: str, number: int, *, merge_method: str = "squash"
+    ) -> str:
+        """Mark the stub PR merged, return a deterministic merge SHA."""
+        self.calls.append(
+            {
+                "op": "merge_pr",
+                "owner": owner,
+                "repo": repo,
+                "number": number,
+                "merge_method": merge_method,
+            }
+        )
+        key = (owner, repo, number)
+        pr = self._by_number.get(key)
+        if pr is None:
+            raise GitHubNotFoundError(f"stub: PR {owner}/{repo}#{number} not found")
+        merge_sha = f"merged-{number}-{owner}-{repo}"
+        # Update both lookup dicts with the merged state.
+        updated = pr.model_copy(
+            update={"state": "closed", "mergeable": None, "merged": True}
+        )
+        self._by_number[key] = updated
+        if (owner, repo, pr.branch) in self._prs:
+            self._prs[(owner, repo, pr.branch)] = updated
+        return merge_sha

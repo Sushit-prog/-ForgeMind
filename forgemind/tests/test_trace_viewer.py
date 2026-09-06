@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import select
 
 from app.models import (
     Approval,
@@ -184,6 +185,58 @@ def test_trace_surfaces_failure_reason(client, db_session) -> None:
     assert "test suite failed: VALUE != 3" in body
     # Terminal task: no auto-refresh.
     assert 'http-equiv="refresh"' not in body
+
+
+def test_trace_control_panel_at_approval(client, db_session) -> None:
+    """Phase 12 control panel: recommendation + Approve/Merge + token input."""
+    task = _seed_repo_task(db_session)
+    _seed_events(db_session, task)
+
+    body = client.get(f"/tasks/{task.id}/trace").text
+
+    # The derived recommendation (Reviewer APPROVE + Security PASS = merge).
+    assert "recommend: merge" in body
+    assert "Reviewer APPROVE" in body
+    assert "Security PASS" in body
+    # Both buttons + the bearer-token input are rendered.
+    assert 'id="btnApprove"' in body
+    assert 'id="btnMerge"' in body
+    assert 'id="forgemindToken"' in body
+    # Merge is disabled until the task is approved+merged — here it IS
+    # approved (seeded Approval action=approve) and NOT merged, so enabled.
+    assert 'id="btnMerge" class="merge"' in body
+    assert (
+        'id="btnApprove" disabled' in body
+    )  # status is AWAITING_APPROVAL → approve enables
+    # Terminal palette is applied.
+    assert "#0A0F08" in body
+    assert "#8AFF57" in body
+    assert "#CAFF3C" in body
+    assert "monospace" in body
+
+
+def test_trace_control_panel_shows_merged_state(client, db_session) -> None:
+    """After a merge, the banner and merge button reflect merged=True."""
+    from datetime import datetime, timezone
+
+    task = _seed_repo_task(db_session)
+    _seed_events(db_session, task, status="COMPLETED")
+    pr = db_session.scalar(
+        select(PullRequest)
+        .where(PullRequest.task_id == task.id)
+        .order_by(PullRequest.created_at.desc())
+        .limit(1)
+    )
+    assert pr is not None
+    pr.merged_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    pr.merge_commit_sha = "abc123"
+    db_session.commit()
+
+    body = client.get(f"/tasks/{task.id}/trace").text
+
+    assert "Merged as" in body
+    assert "abc123" in body
+    assert 'id="btnMerge" class="merge" disabled' in body  # already merged
 
 
 def test_trace_zero_events_is_not_an_error(client, db_session) -> None:

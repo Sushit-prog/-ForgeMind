@@ -1,4 +1,4 @@
-"""GitHub REST API errors (architecture doc section J, Phase 10).
+"""GitHub REST API errors (architecture doc section J, Phase 10 + 12).
 
 A small taxonomy so the lifecycle can distinguish the cases that matter:
 
@@ -10,8 +10,12 @@ A small taxonomy so the lifecycle can distinguish the cases that matter:
 - ``GitHubNotFoundError`` — 404 (missing issue/repo). Permanent, but
   distinct from auth so a bad URL is diagnosable.
 
-Everything else surfaces as the base ``GitHubError``. There is no merge
-method here or anywhere in this package — never.
+Everything else surfaces as the base ``GitHubError``. Phase 12 adds a gated
+``merge_pr`` method to the client — the only path to a merge is through the
+``github.merge_pr`` tool, which enforces approval evidence,
+MERGE_ALLOWED_REPOS, and a fresh staleness check before calling it. Merge
+API failures (405 not-mergeable, 409 conflict, etc.) surface as
+``GitHubError`` and are recorded by the tool as FAILED.
 """
 
 from __future__ import annotations

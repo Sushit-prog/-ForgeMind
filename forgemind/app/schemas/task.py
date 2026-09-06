@@ -82,6 +82,19 @@ class ApprovalRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=10_000)
 
 
+class MergeResult(BaseModel):
+    """Response body for POST /tasks/{id}/merge.
+
+    Business denials (not approved, not allowlisted, stale, already merged)
+    return ``merged=False`` with a specific ``denial_reason``.  Genuine
+    GitHub API failures also return ``merged=False`` with the error text.
+    """
+
+    merged: bool
+    merge_commit_sha: str | None = None
+    denial_reason: str | None = None
+
+
 class TaskRead(BaseModel):
     """Response body for a task record."""
 
@@ -94,6 +107,9 @@ class TaskRead(BaseModel):
     replan_count: int = 0
     created_at: datetime
     updated_at: datetime
+    # Phase 12: derived recommendation signal (None when no verdicts yet).
+    recommended_action: str | None = None
+    recommendation_reason: str | None = None
 
 
 class ExecutionEventRead(BaseModel):

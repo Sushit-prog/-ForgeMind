@@ -1,3 +1,15 @@
-from app.schemas.task import ApprovalRequest, ExecutionEventRead, TaskCreate, TaskRead
+from app.schemas.task import (
+    ApprovalRequest,
+    ExecutionEventRead,
+    MergeResult,
+    TaskCreate,
+    TaskRead,
+)
 
-__all__ = ["ApprovalRequest", "ExecutionEventRead", "TaskCreate", "TaskRead"]
+__all__ = [
+    "ApprovalRequest",
+    "ExecutionEventRead",
+    "MergeResult",
+    "TaskCreate",
+    "TaskRead",
+]

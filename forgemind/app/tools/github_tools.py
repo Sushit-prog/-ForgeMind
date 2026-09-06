@@ -1,4 +1,4 @@
-"""``github.*`` tools (architecture doc section F, Phase 10).
+"""``github.*`` tools (architecture doc section F, Phase 10 + Phase 12).
 
 - ``github.get_issue``     (github.read,  LOW)    — read an UPSTREAM issue.
 - ``github.comment_issue`` (github.write, MEDIUM) — comment on an issue
@@ -6,6 +6,9 @@
 - ``github.create_pr``     (github.write, HIGH)   — the first genuinely
   HIGH-risk tool, and the phase's approval-gated surface. It opens a DRAFT
   PR on the FORK.
+- ``github.merge_pr``      (github.merge, HIGH)    — Phase 12's GATED
+  squash merge. Only reachable through ``POST /tasks/{id}/merge``, never
+  through an autonomous agent loop.
 
 Security posture, enforced here (never by convention):
 
@@ -17,8 +20,22 @@ Security posture, enforced here (never by convention):
   closed. ``repositories.fork_url == repositories.url`` is a SecurityError.
 - ``github.create_pr`` opens a draft by default and the agent always does —
   the second safety layer under the AWAITING_APPROVAL human gate.
-- There is no ``github.merge`` tool, capability, or client method anywhere;
-  the policy engine additionally denies it by name as a second layer.
+- ``github.merge_pr`` enforces THREE hard gates inside ``execute`` before
+  it ever calls the GitHub API:
+  1. The task has an ``Approval`` row with ``action="approve"`` AND the
+     task status is ``COMPLETED`` (post-approval).
+  2. The fork slug (``pull_requests.repo``) is in
+     ``settings.merge_allowed_repo_set`` (empty = everything denied).
+  3. A fresh staleness check (VERIFICATION's pattern): the PR is still
+     open, GitHub reports ``mergeable == True``, and the current base SHA
+     matches what was captured when the PR was created
+     (``pull_requests.base_sha``). No rebase is needed.
+  Only then is ``client.merge_pr`` reached (squash merge only).
+- The policy engine's ``ExplicitDenyRule`` denies the name ``github.merge``
+  by name as a second layer (belt-and-suspenders) — our tool is
+  ``github.merge_pr``, so this denial does NOT apply. The capability gate
+  (``github.merge``) is the first gate; the three checks above are the
+  second.
 """
 
 from __future__ import annotations
@@ -136,6 +153,7 @@ class CreatePrOutput(BaseModel):
     number: int
     url: str
     status: str  # draft | open
+    base_sha: str | None = None
 
 
 class GitHubGetIssueTool(Tool):
@@ -205,6 +223,216 @@ class GitHubCreatePrTool(Tool):
             number=pr.number,
             url=pr.url,
             status=pr.status,
+            base_sha=pr.base_sha,
+        )
+
+
+# -- Phase 12: gated squash merge -------------------------------------------
+
+
+class MergePrInput(BaseModel):
+    """The ONLY input the caller may give: which task's PR to merge.
+
+    Everything else — the PR number, fork slug, approval check, MERGE_ALLOWED_REPOS,
+    staleness check — is resolved SERVER-SIDE. ``extra="forbid"`` rejects a
+    smuggled ``owner``/``repo``/``number`` field at validation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: uuid.UUID
+
+
+class MergePrOutput(BaseModel):
+    """Structured output for the merge action. Business denials (not
+    approved, not allowlisted, stale, already merged) return ``merged=False``
+    with a specific ``denial_reason`` — the tool does NOT raise. Genuine
+    GitHub API errors raise and become ``FAILED`` (pipeline writes the row).
+    The endpoint translates both to a human-facing ``AuditLog`` row."""
+
+    merged: bool
+    merge_commit_sha: str | None = None
+    denial_reason: str | None = None
+    repo: str | None = None
+    pr_number: int | None = None
+
+
+class GitHubMergePrTool(Tool):
+    """Gated squash-merge of the task's draft PR.
+
+    Only reachable through ``POST /tasks/{id}/merge`` (the human-operator
+    merge endpoint) — never through an autonomous agent loop.  Three hard
+    gates inside ``execute`` enforce fail-closed security:
+
+    1. **Approval**: latest ``Approvals`` row for the task must have
+       ``action="approve"`` AND the task must be in ``COMPLETED`` (the
+       post-approval terminal state).  The tool re-checks this independently
+       of the endpoint's own check (defense in depth).
+    2. **Repo allowlist**: the fork slug (``pull_requests.repo``) must be in
+       ``settings.merge_allowed_repo_set``.  Empty = everything denied.
+    3. **Staleness** (VERIFICATION's pattern): re-fetch the PR via the
+       GitHub API (the fresh source of truth) and compare against the
+       persisted ``pull_requests.base_sha`` — must be equal.  Also require
+       PR ``state="open"`` and ``mergeable=True``.
+
+    Only after all three gates pass is ``client.merge_pr`` called (squash
+    merge only).  On success: ``pull_requests.merged_at`` and
+    ``pull_requests.merge_commit_sha`` are set atomically.
+    """
+
+    name = "github.merge_pr"
+    description = (
+        "Gated squash-merge of the task's PR into its fork. Requires: "
+        "approval evidence, the fork in MERGE_ALLOWED_REPOS, and a fresh "
+        "staleness check (PR still open, base unchanged). Returns merged: "
+        "True + sha, or merged: False + a specific denial reason."
+    )
+    input_schema = MergePrInput
+    output_schema = MergePrOutput
+    capabilities: list[str] = ["github.merge"]
+    risk = "HIGH"
+
+    async def execute(
+        self, input: MergePrInput, ctx: ExecutionContext
+    ) -> MergePrOutput:
+        if ctx.db is None or ctx.task_id is None:
+            raise GitHubConfigError("github.merge_pr requires a task context (db)")
+
+        from sqlalchemy import select
+
+        from app.models import PullRequest, Task
+        from app.models.base import utcnow
+        from app.config import get_settings
+
+        task = ctx.db.get(Task, ctx.task_id)
+        if task is None:
+            raise GitHubConfigError(f"task {ctx.task_id} not found")
+
+        pr = ctx.db.scalar(
+            select(PullRequest)
+            .where(PullRequest.task_id == task.id)
+            .order_by(PullRequest.created_at.desc(), PullRequest.id.desc())
+            .limit(1)
+        )
+        if pr is None:
+            raise GitHubConfigError(f"no pull request recorded for task {task.id}")
+
+        # -- Gate 1: already merged? --
+        if pr.merged_at is not None:
+            return MergePrOutput(
+                merged=False,
+                denial_reason="PR already merged",
+                repo=pr.repo,
+                pr_number=pr.number,
+            )
+
+        # -- Gate 2: approved? --
+        from app.models import Approval as ApprovalModel
+
+        latest_approval = ctx.db.scalar(
+            select(ApprovalModel)
+            .where(ApprovalModel.task_id == task.id)
+            .order_by(ApprovalModel.created_at.desc(), ApprovalModel.id.desc())
+            .limit(1)
+        )
+        task_status_ok = task.status == "COMPLETED"
+        approval_ok = (
+            latest_approval is not None and latest_approval.action == "approve"
+        )
+        if not (task_status_ok and approval_ok):
+            return MergePrOutput(
+                merged=False,
+                denial_reason=(
+                    "task not approved"
+                    if not approval_ok
+                    else f"task status is {task.status!r}, expected COMPLETED"
+                ),
+                repo=pr.repo,
+                pr_number=pr.number,
+            )
+
+        # -- Gate 3: repo in MERGE_ALLOWED_REPOS? --
+        settings = get_settings()
+        allowed = settings.merge_allowed_repo_set
+        repo_slug = pr.repo.strip().lower()
+        if repo_slug not in allowed:
+            return MergePrOutput(
+                merged=False,
+                denial_reason=(
+                    f"repo {pr.repo!r} not in MERGE_ALLOWED_REPOS "
+                    f"(allowed: {sorted(allowed) or '(empty — merge disabled everywhere)'})"
+                ),
+                repo=pr.repo,
+                pr_number=pr.number,
+            )
+
+        # -- Gate 4: fresh staleness check (VERIFICATION pattern) --
+        _, repository = _task_and_repository(ctx)
+        if not repository.fork_url:
+            raise GitHubConfigError(
+                "repository.fork_url is unset — cannot resolve fork for merge"
+            )
+        from app.github.slug import parse_github_slug
+
+        fork_owner, fork_repo = parse_github_slug(repository.fork_url)
+
+        try:
+            fresh = await _client().get_pr(fork_owner, fork_repo, pr.number)
+        except Exception as exc:  # noqa: BLE001 — API error at staleness = fail closed
+            return MergePrOutput(
+                merged=False,
+                denial_reason=f"staleness check failed: {exc}",
+                repo=pr.repo,
+                pr_number=pr.number,
+            )
+
+        # PR must still be open.
+        if fresh.state and fresh.state not in ("open", "draft"):
+            return MergePrOutput(
+                merged=False,
+                denial_reason=f"PR is {fresh.state!r}, expected open",
+                repo=pr.repo,
+                pr_number=pr.number,
+            )
+
+        # GitHub must report mergeable == True.
+        if fresh.mergeable is False:
+            return MergePrOutput(
+                merged=False,
+                denial_reason=(
+                    f"GitHub reports mergeable=False "
+                    f"(mergeable_state={fresh.mergeable_state!r})"
+                ),
+                repo=pr.repo,
+                pr_number=pr.number,
+            )
+
+        # Base-branch drift: current base_sha must match persisted base_sha.
+        if pr.base_sha is not None and fresh.base_sha != pr.base_sha:
+            return MergePrOutput(
+                merged=False,
+                denial_reason=(
+                    f"base branch drifted since PR was opened "
+                    f"(expected {pr.base_sha}, got {fresh.base_sha})"
+                ),
+                repo=pr.repo,
+                pr_number=pr.number,
+            )
+
+        # -- All gates passed: execute the merge. --
+        merge_sha = await _client().merge_pr(
+            fork_owner, fork_repo, pr.number, merge_method="squash"
+        )
+
+        pr.merged_at = utcnow()
+        pr.merge_commit_sha = merge_sha
+        ctx.db.commit()
+
+        return MergePrOutput(
+            merged=True,
+            merge_commit_sha=merge_sha,
+            repo=pr.repo,
+            pr_number=pr.number,
         )
 
 
@@ -212,4 +440,5 @@ GITHUB_TOOLS: list[Tool] = [
     GitHubGetIssueTool(),
     GitHubCommentIssueTool(),
     GitHubCreatePrTool(),
+    GitHubMergePrTool(),
 ]

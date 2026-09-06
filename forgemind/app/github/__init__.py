@@ -1,10 +1,15 @@
-"""GitHub client + tools (Phase 10).
+"""GitHub client + tools (Phase 10 + Phase 12).
 
 The thin REST wrapper (``client.py``), URL-to-slug parsing (``slug.py``),
 error taxonomy (``errors.py``), and the deterministic ``StubGitHubClient``
-used by tests and key-less dev (``stub.py``). There is deliberately NO
-``merge`` method here and no ``github.merge`` capability anywhere in the
-codebase — merging stays a manual action on GitHub.
+used by tests and key-less dev (``stub.py``).
+
+Phase 12 adds a GATED ``merge_pr`` method to the client. There is no
+unfettered merge primitive: the only code path that calls ``merge_pr`` is
+the ``github.merge_pr`` tool, which enforces three hard gates (approval
+evidence on the task, MERGE_ALLOWED_REPOS for the fork slug, and a fresh
+base-branch staleness check) before it is ever reached. Merging remains a
+human-initiated action; ForgeMind opens the draft PR and then waits.
 """
 
 from __future__ import annotations

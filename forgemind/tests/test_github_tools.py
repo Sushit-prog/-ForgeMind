@@ -359,16 +359,24 @@ def test_create_pr_denied_without_github_write(
     assert row is not None and row.status == "DENIED"
 
 
-def test_github_merge_does_not_exist() -> None:
-    """No github.merge tool is registered — grep-verifiable literal check."""
+def test_github_merge_pr_is_registered_but_not_unfettered_merge() -> None:
+    """Phase 12: the merge surface is the gated ``github.merge_pr`` tool.
+
+    The tool name is specifically NOT the bare ``github.merge`` — so the
+    policy engine's ``ExplicitDenyRule`` (which denies ``github.merge`` by
+    name as a second layer) never shadows the real, capability-gated tool.
+    """
     names = {t.name for t in GITHUB_TOOLS}
-    assert "github.merge" not in names
-    assert "merge" not in " ".join(names)
+    assert "github.merge_pr" in names
+    assert "github.merge" not in names  # the name-scoped policy denial stays clean
 
 
 def test_github_merge_denied_by_policy_even_if_registered() -> None:
-    """Belt-and-suspenders: if a merge tool were ever registered, the policy
-    engine's explicit-deny rule rejects it before execution."""
+    """Belt-and-suspenders: if a bare merge tool were ever registered, the
+    policy engine's explicit-deny rule rejects it before execution. The
+    Phase 12 tool is ``github.merge_pr`` (deliberately not ``github.merge``),
+    so it does NOT trip this name-scoped denial — see
+    ``test_github_merge_pr_passes_policy`` in test_merge_tool.py."""
     from app.policies.engine import PolicyEngine
 
     class _MergeInput(dict):

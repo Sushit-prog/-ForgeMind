@@ -54,6 +54,9 @@ def test_migrations_upgrade_fresh_db() -> None:
         engine = create_engine(url)
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
+        # Phase 12 merge columns land on pull_requests with the chain head.
+        pr_cols = {c["name"] for c in inspector.get_columns("pull_requests")}
+        assert {"base_sha", "merged_at", "merge_commit_sha"} <= pr_cols
         engine.dispose()
 
         assert EXPECTED_TABLES <= tables, f"missing tables: {EXPECTED_TABLES - tables}"
@@ -61,6 +64,40 @@ def test_migrations_upgrade_fresh_db() -> None:
 
         # Alembic runs migrations once: upgrading again is a no-op.
         command.upgrade(cfg, "head")
+    finally:
+        os.close(fd)
+        os.unlink(path)
+
+
+def test_migrations_downgrade_removes_merge_columns() -> None:
+    """Upgrade -> downgrade -1 -> upgrade again; merge columns vanish and return."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    url = f"sqlite:///{path.replace(os.sep, '/')}"
+    try:
+        cfg = Config("alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", url)
+        command.upgrade(cfg, "head")
+
+        engine = create_engine(url)
+        pr_cols = {c["name"] for c in inspect(engine).get_columns("pull_requests")}
+        assert {"base_sha", "merged_at", "merge_commit_sha"} <= pr_cols
+        engine.dispose()
+
+        # Downgrade exactly one revision (drops the Phase 12 columns).
+        command.downgrade(cfg, "-1")
+        engine = create_engine(url)
+        pr_cols = {c["name"] for c in inspect(engine).get_columns("pull_requests")}
+        assert "merged_at" not in pr_cols
+        assert "merge_commit_sha" not in pr_cols
+        assert "base_sha" not in pr_cols
+        engine.dispose()
+
+        # And the chain still upgrades cleanly again afterwards.
+        command.upgrade(cfg, "head")
+        engine = create_engine(url)
+        pr_cols = {c["name"] for c in inspect(engine).get_columns("pull_requests")}
+        assert {"base_sha", "merged_at", "merge_commit_sha"} <= pr_cols
+        engine.dispose()
     finally:
         os.close(fd)
         os.unlink(path)

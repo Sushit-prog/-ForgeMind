@@ -78,6 +78,10 @@ def test_mock_mode_skips_push_and_persists_draft_pr(
     assert row.repo == "fork-owner/fork-repo"
     assert row.number == pr.number
     assert row.status == "draft"
+    # Phase 12: the base SHA is captured at PR creation — the reference the
+    # pre-merge staleness check compares against later.
+    assert row.base_sha is not None
+    assert pr.base_sha == row.base_sha
 
     # push skipped + audited, exactly one create_pr call, no comment (no issue).
     assert audits_for(db_session, task.id, "github.push_skipped")
