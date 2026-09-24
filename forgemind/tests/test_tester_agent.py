@@ -193,6 +193,49 @@ def test_parse_test_run_deterministic() -> None:
     assert hung.exit_code is None
 
 
+def test_parse_test_run_real_pytest_9_footer() -> None:
+    """Regression (task d5caf4e6): a REAL pytest 9 run's footer is a bare
+    "1 failed, 335 passed in 106.72s (0:01:46)" line (no ===...=== wrap) and
+    its short-summary failure line has NO trailing " - reason". Both must
+    parse as a definite 'failed' with exact counts — NOT the 0/0 'error' the
+    old regexes produced."""
+    output = (
+        "________________ test_show_export_design_show_with_2011_in_text ________________\n"
+        "\n"
+        "    def test_show_export_design_show_with_2011_in_text(self, ...):\n"
+        "        ...\n"
+        "        out_path = export_blueprint(design_db, out=str(tmp_path / 'kit.md'))\n"
+        ">       assert out_path is not None\n"
+        "E       assert None is not None\n"
+        "\n"
+        "tests/test_design.py:1169: AssertionError\n"
+        "=========================== short test summary info ============================\n"
+        "FAILED tests/test_design.py::test_show_export_design_show_with_2011_in_text\n"
+        "1 failed, 335 passed in 106.72s (0:01:46)\n"
+    )
+    result = parse_test_run(exit_code=1, output=output, timed_out=False)
+
+    assert result.status == "failed"
+    assert result.failed == 1
+    assert result.passed == 335
+    assert result.exit_code == 1
+    assert result.missing_modules == []
+    assert [f.test for f in result.failures] == [
+        "tests/test_design.py::test_show_export_design_show_with_2011_in_text"
+    ]
+
+    # The legacy ===-wrapped forms still parse identically.
+    legacy = parse_test_run(
+        exit_code=1,
+        output="=== 1 failed, 2 passed in 0.6s ===\nFAILED tests/test_s.py::test_x - AssertionError: nope",
+        timed_out=False,
+    )
+    assert legacy.status == "failed"
+    assert legacy.failed == 1 and legacy.passed == 2
+    assert legacy.failures[0].test == "tests/test_s.py::test_x"
+    assert legacy.failures[0].output == "AssertionError: nope"
+
+
 def test_tester_requires_db() -> None:
     from app.agents.tester.agent import TestError
 

@@ -25,11 +25,18 @@ from pydantic import BaseModel, Field
 TestRunStatus = Literal["passed", "failed", "error", "install_failed"]
 
 # pytest summary lines: "=== 1 failed, 2 passed in 0.5s ===" / "=== 3 passed ==="
+# and pytest 9's bare footer "1 failed, 335 passed in 106.72s (0:01:46)" (no
+# surrounding "=" delimiters) — the "=" wrap is optional, and a line only
+# counts once it carries a real "passed" group.
 _SUMMARY_RE = re.compile(
-    r"===+\s*(?:(?P<failed>\d+)\s+failed(?:,\s*)?)?(?:(?P<passed>\d+)\s+passed)?.*?==="
+    r"^(?:=+\s*)?(?:"
+    r"(?P<failed>\d+)\s+failed(?:,\s*\d+\s+(?:skipped|error|warning)s?)?(?:,\s*)?"
+    r")?(?P<passed>\d+)\s+passed"
+    r"(?:,\s*\d+\s+(?:skipped|error|warning)s?)?(?:\s+in\s+[^=]*)?=*$"
 )
-# pytest short-summary failure lines: "FAILED tests/test_app.py::test_v - AssertionError: ..."
-_FAILED_LINE_RE = re.compile(r"^FAILED\s+(.+?)\s+-\s+(.*)$")
+# pytest short-summary failure lines: "FAILED tests/test_app.py::test_v - ..."
+# (legacy) AND pytest 8+'s bare "FAILED tests/x.py::test_y" (no " - reason").
+_FAILED_LINE_RE = re.compile(r"^FAILED\s+(.+?)(?:\s+-\s+(.*))?$")
 # Python "No module named X" traceback lines (Phase 13 diagnostic aid).
 _MISSING_MODULE_RE = re.compile(
     r"ModuleNotFoundError:\s*No module named ['\"]([^'\"]+)['\"]"
@@ -90,7 +97,7 @@ def parse_test_run(
         match = _FAILED_LINE_RE.match(line.strip())
         if match:
             failures.append(
-                FailureDetail(test=match.group(1), output=match.group(2)[:2000])
+                FailureDetail(test=match.group(1), output=(match.group(2) or "")[:2000])
             )
 
     counts = _counts(output)
