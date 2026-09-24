@@ -72,11 +72,18 @@ class RunTestTool(Tool):
             )
 
         from app.config import get_settings
+        from app.shell.provision import venv_bin_dir, venv_path_for
 
+        # Phase 13: run the suite with the task's OWN venv on PATH (when it
+        # exists — repos without install_command fall back to ambient PATH).
+        venv_bin = venv_bin_dir(
+            venv_path_for(repository.id, wt.task_id, manager.cache_dir)
+        )
         runner = CommandRunner(
             path,
             repository.test_command,
             get_settings().test_timeout_seconds,
+            venv_bin=venv_bin,
         )
         # subprocess.run with up to test_timeout_seconds — a full pipeline
         # stage of blocking I/O; must never run on the event loop (Fix 3).

@@ -109,6 +109,24 @@ def venv_path_for(
     return root / "venvs" / f"{repository_id}-{task_id}"
 
 
+def venv_bin_dir(venv: Path) -> Path | None:
+    """The venv's executable directory — ``bin`` on POSIX, ``Scripts`` on
+    Windows — or ``None`` when the path is not a real venv.
+
+    ``shell.run_test`` prepends this to PATH so ``pytest`` (and any helper it
+    spawns) resolves from the task's venv, never the worker image's system
+    interpreter. Guarded on the canonical ``pyvenv.cfg`` marker so a
+    not-yet-created, half-created, or (in hermetic tests) faked venv dir
+    silently keeps the current ambient-PATH behavior.
+    """
+    if not venv.is_dir() or not (venv / "pyvenv.cfg").is_file():
+        return None
+    for candidate in (venv / "bin", venv / "Scripts"):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def install_dependencies(
     db: Session, worktree_id: uuid.UUID
 ) -> ProvisionResult:

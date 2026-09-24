@@ -11,6 +11,7 @@ input path into this module at all.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -41,14 +42,26 @@ class CommandResult:
 
 
 class CommandRunner:
-    """Run the repository's validated test command inside a worktree."""
+    """Run the repository's validated test command inside a worktree.
+
+    Phase 13: when a task venv exists (supplied by the tool via
+    ``venv_bin_dir``), its executable directory is prepended to PATH so the
+    command — and any helper it spawns — resolves from the venv, never the
+    worker image's system interpreter. No venv = ambient PATH (unchanged
+    behavior for repositories without provisioning).
+    """
 
     def __init__(
-        self, worktree_path: Path, test_command: str, timeout_seconds: float
+        self,
+        worktree_path: Path,
+        test_command: str,
+        timeout_seconds: float,
+        venv_bin: Path | None = None,
     ) -> None:
         self.worktree_path = worktree_path
         self.test_command = test_command
         self.timeout_seconds = timeout_seconds
+        self.venv_bin = venv_bin
 
     def run(self) -> CommandResult:
         # Re-validate the STORED value (not agent input — there is no agent
@@ -60,6 +73,15 @@ class CommandRunner:
             )
         tokens = validate_test_command(self.test_command)
 
+        # The token list is untouched (policy-validated); the venv wins by
+        # PATH order, so a plain `pytest` token resolves to the venv's binary.
+        env = None
+        if self.venv_bin is not None:
+            env = dict(os.environ)
+            env["PATH"] = os.pathsep.join(
+                [str(self.venv_bin), *env.get("PATH", "").split(os.pathsep)]
+            )
+
         started = time.perf_counter()
         try:
             proc = subprocess.run(
@@ -70,6 +92,7 @@ class CommandRunner:
                 encoding="utf-8",
                 errors="replace",
                 timeout=self.timeout_seconds,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             duration = int((time.perf_counter() - started) * 1000)

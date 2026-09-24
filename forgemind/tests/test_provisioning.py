@@ -228,3 +228,108 @@ def test_venv_path_is_a_cache_sibling(db_session, tmp_path) -> None:
     assert venv_path_for(repo.id, task.id) == (
         Path(wt.path).parent.parent / "venvs" / f"{repo.id}-{task.id}"
     )
+
+
+def test_venv_bin_dir_guards_on_a_real_venv(tmp_path) -> None:
+    """``venv_bin_dir`` only wires shell.run_test into a REAL provisioned venv
+    (``pyvenv.cfg`` present) — a not-yet-created, half-created, or merely
+    faked directory keeps the ambient-PATH behavior."""
+    from app.shell.provision import venv_bin_dir
+
+    venv = tmp_path / "venvs" / "r-t"
+    assert venv_bin_dir(venv) is None  # nothing there yet
+
+    (venv / "bin").mkdir(parents=True)
+    assert venv_bin_dir(venv) is None  # dir exists but no pyvenv.cfg
+    (venv / "pyvenv.cfg").write_text("home = /usr\n")
+    assert venv_bin_dir(venv) == venv / "bin"  # POSIX layout
+
+    # Windows-style venv resolves the Scripts dir instead.
+    win = tmp_path / "winvenv"
+    (win / "Scripts").mkdir(parents=True)
+    (win / "pyvenv.cfg").write_text("home = C:\\py\n")
+    assert venv_bin_dir(win) == win / "Scripts"
+
+
+def test_run_test_runs_inside_the_task_venv(db_session, tmp_path, monkeypatch) -> None:
+    """ROOT-CAUSE regression (task 70dd7cd1): after shell.install_deps, the
+    suite must execute with the task venv's bin dir FIRST on PATH, so
+    ``pytest`` (and its helper processes) resolve from the venv — NOT the
+    worker image's /usr/local/python3.12 that lacked litellm/responses."""
+    import asyncio
+    import os
+    import subprocess
+
+    from app.shell.runner import subprocess as runner_subprocess
+    from app.tools.base import ExecutionContext
+    from app.tools.shell_tools import RunTestInput, RunTestTool
+
+    repo_path = make_repo(tmp_path, with_pyproject=True)
+    repo, task = repo_and_task(db_session, repo_path)
+    repo.test_command = "pytest"
+    db_session.commit()
+    wt = make_worktree(db_session, repo, task)
+    pending(db_session)
+
+    # Materialize the venv the provisioner WOULD have created (pyvenv.cfg +
+    # bin), then intercept the real subprocess to observe what runs.
+    venv = venv_path_for(repo.id, task.id)
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr\n")
+
+    captured: dict = {}
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args[0]
+        captured["cwd"] = kwargs.get("cwd")
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args[0], 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(runner_subprocess, "run", fake_run)
+    ctx = ExecutionContext(task_id=task.id, agent_type="tester", db=db_session)
+    result = asyncio.run(
+        RunTestTool().execute(RunTestInput(worktree_id=wt.id), ctx)
+    )
+
+    assert result.exit_code == 0
+    assert captured["args"] == ["pytest"]
+    assert captured["cwd"] == str(Path(wt.path))
+    venv_bin = venv / "bin"
+    assert captured["env"] is not None
+    assert captured["env"]["PATH"].split(os.pathsep)[0] == str(venv_bin)
+
+
+def test_run_test_falls_back_to_ambient_path_without_a_venv(
+    db_session, tmp_path, monkeypatch
+) -> None:
+    """A repository with NO provisioning (nothing installed) keeps the
+    ambient-PATH behavior — the venv gate must never break unprovisioned repos."""
+    import asyncio
+    import subprocess
+
+    from app.shell.runner import subprocess as runner_subprocess
+    from app.tools.base import ExecutionContext
+    from app.tools.shell_tools import RunTestInput, RunTestTool
+
+    repo_path = make_repo(tmp_path, with_pyproject=False)  # no install setup
+    repo, task = repo_and_task(db_session, repo_path)
+    repo.test_command = "pytest"
+    db_session.commit()
+    wt = make_worktree(db_session, repo, task)
+    pending(db_session)
+    assert not venv_path_for(repo.id, task.id).exists()
+
+    captured: dict = {}
+
+    def fake_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args[0], 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(runner_subprocess, "run", fake_run)
+    ctx = ExecutionContext(task_id=task.id, agent_type="tester", db=db_session)
+    result = asyncio.run(
+        RunTestTool().execute(RunTestInput(worktree_id=wt.id), ctx)
+    )
+
+    assert result.exit_code == 0
+    assert captured["env"] is None  # pristine env — ambient PATH resolution
