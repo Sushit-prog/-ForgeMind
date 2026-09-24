@@ -20,6 +20,7 @@ class Capability(str, enum.Enum):
     GIT_WRITE = "git.write"
     SHELL_TEST = "shell.test"
     SHELL_BUILD = "shell.build"
+    SHELL_INSTALL = "shell.install"
     GITHUB_READ = "github.read"
     GITHUB_WRITE = "github.write"
     GITHUB_MERGE = "github.merge"

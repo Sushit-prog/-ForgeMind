@@ -15,34 +15,48 @@ import importlib
 import uuid
 
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.models import ExecutionEvent, TaskStatus
+
+
+# Some environments carry WORKER_JOB_TIMEOUT_SECONDS in their local .env
+# (pydantic-settings folds .env in at Settings()-construction). Env vars
+# override .env, so pinning the var makes these assertions hermetic — the
+# ceiling is whatever THIS test says it is, never the ambient machine.
+def _pin_ceiling(monkeypatch, value: str) -> None:
+    monkeypatch.setenv("WORKER_JOB_TIMEOUT_SECONDS", value)
+    get_settings.cache_clear()
 
 
 # --- configurable ceiling ----------------------------------------------------
 
 
-def test_default_ceiling_is_900() -> None:
-    assert get_settings().worker_job_timeout_seconds == 900
-    from app.worker.worker import WorkerSettings
+def test_default_ceiling_is_900(monkeypatch) -> None:
+    # The DECLARED default is 900 (true regardless of any .env).
+    assert Settings.model_fields["worker_job_timeout_seconds"].default == 900
+    # With no other override in force the runtime honors exactly that — pin
+    # the var so the ambient .env cannot leak into the assertion.
+    _pin_ceiling(monkeypatch, "900")
+    import app.worker.worker as worker_module
 
-    assert WorkerSettings.job_timeout == 900
+    importlib.reload(worker_module)
+    assert get_settings().worker_job_timeout_seconds == 900
+    assert worker_module.WorkerSettings.job_timeout == 900
 
 
 def test_env_override_rewires_ceiling(monkeypatch) -> None:
-    monkeypatch.setenv("WORKER_JOB_TIMEOUT_SECONDS", "1234")
-    get_settings.cache_clear()
+    _pin_ceiling(monkeypatch, "1234")
     import app.worker.worker as worker_module
 
     try:
         reloaded = importlib.reload(worker_module)
         assert reloaded.WorkerSettings.job_timeout == 1234
     finally:
-        # delenv BEFORE the restore-reload, or the reload would re-read the
-        # overridden value (cache_clear alone cannot help while env persists).
-        monkeypatch.delenv("WORKER_JOB_TIMEOUT_SECONDS", raising=False)
-        get_settings.cache_clear()
-        importlib.reload(worker_module)  # restore defaults for later tests
+        # Restore deterministically: pin the declared default back (env vars
+        # beat .env) and reload, so later tests observe 900 — never whatever
+        # the ambient .env happens to contain.
+        _pin_ceiling(monkeypatch, "900")
+        importlib.reload(worker_module)
 
     assert worker_module.WorkerSettings.job_timeout == 900
 
@@ -55,7 +69,7 @@ def test_startup_logs_effective_ceiling(monkeypatch, caplog) -> None:
     from app.worker.worker import _on_startup
 
     monkeypatch.setenv("WORKER_SWEEP_ENABLED", "false")
-    get_settings.cache_clear()
+    _pin_ceiling(monkeypatch, "900")
     try:
         with caplog.at_level(logging.INFO, logger="app.worker.worker"):
             asyncio.run(_on_startup({}))

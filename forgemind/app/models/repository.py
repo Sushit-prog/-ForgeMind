@@ -35,6 +35,10 @@ class Repository(Base):
     test_command: Mapped[str | None] = mapped_column(Text, nullable=True)
     lint_command: Mapped[str | None] = mapped_column(Text, nullable=True)
     build_command: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 13: server-side dependency-install command, detected + validated
+    # at discovery time (see ``install_policy``). shell.install_deps runs it
+    # inside the task's own venv — never derived from agent input.
+    install_command: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

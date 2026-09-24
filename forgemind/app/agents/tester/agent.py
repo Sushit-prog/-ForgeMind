@@ -2,11 +2,20 @@
 
 The one agent with NO LLM call at all. Section 41's principle — "process
 exit code + structured test parser", not "LLM decides" — applies most
-literally here: run the repository's configured test command exactly once
-via ``shell.run_test`` (through the pipeline, for audit), parse the exit
-code + output deterministically, persist a ``TestRun``, done. There is no
-judgment call anywhere in this agent, so there is nothing for an LLM to
-hallucinate and nothing for a prompt injection to redirect.
+literally here: provision dependencies, run the repository's configured
+test command exactly once via ``shell.run_test`` (through the pipeline, for
+audit), parse the exit code + output deterministically, persist a
+``TestRun``, done. There is no judgment call anywhere in this agent, so
+there is nothing for an LLM to hallucinate and nothing for a prompt
+injection to redirect.
+
+Phase 13: dependency provisioning is INSTALL-FIRST — ``shell.install_deps``
+runs before ``shell.run_test`` (idempotent: pip re-resolves a satisfied
+venv fast, and a repo with no install_command cleanly skips). A failed
+provision returns ``install_failed`` and runs NO tests: the lifecycle maps
+that to ``TESTING -> FAILED(dependency_install_failed)``, deliberately NOT
+the Debugger's ``tests_error`` path — a dependency-resolution failure is not
+something the Debugger re-running the suite should burn replans on.
 """
 
 from __future__ import annotations
@@ -34,15 +43,48 @@ class TestError(RuntimeError):
 class TestAgent(Agent):
     name: ClassVar[str] = "tester"
     description: ClassVar[str] = (
-        "Runs the repository's configured test command and parses the result."
+        "Provisions dependencies, runs the repository's configured test "
+        "command and parses the result."
     )
-    capabilities: ClassVar[list[str]] = ["shell.test"]
+    capabilities: ClassVar[list[str]] = ["shell.test", "shell.install"]
 
     async def run(self, task: Task, worktree, ctx: ExecutionContext) -> TestResult:
-        """One deterministic ``shell.run_test`` call, parsed and persisted."""
+        """Provision, then one deterministic ``shell.run_test`` call, parsed
+        and persisted. Provision failure -> ``install_failed``, no tests run."""
         if ctx.db is None:
             raise TestError("ExecutionContext.db is required for testing")
         db = ctx.db
+
+        result = await ToolPipeline(db).invoke(
+            "shell.install_deps",
+            {"worktree_id": str(worktree.id)},
+            set(self.capabilities),
+            ctx,
+        )
+        # The tool executes BOTH successes and failures into EXECUTED (its
+        # output carries installed/skipped/exit_code/error so the failed pip
+        # output stays on the audit row, Phase 13 constraint: install output
+        # is persisted like test output). "Done but did not install" is a
+        # clean skip; anything else is a provisioning failure.
+        provisioned = False
+        if result.status == "EXECUTED":
+            output = result.output or {}
+            provisioned = bool(output.get("installed") or output.get("skipped"))
+        if not provisioned:
+            # DENIED (shouldn't happen — the tester holds shell.install), or a
+            # FAILED install call (venv create failed, pip failed, timed out,
+            # mis-stored install_command): distinct from any test outcome.
+            logger.warning(
+                "shell.install_deps not executed for task %s: %s (%s)",
+                task.id,
+                result.status,
+                result.error or result.denial_reason,
+            )
+            return TestResult(
+                status="install_failed",
+                exit_code=None,
+                duration_ms=(result.latency_ms if result.status == "FAILED" else 0),
+            )
 
         result = await ToolPipeline(db).invoke(
             "shell.run_test",

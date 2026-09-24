@@ -207,6 +207,18 @@ class Settings(BaseSettings):
         default=300.0,
         description="Timeout for the test subprocess (env: TEST_TIMEOUT_SECONDS).",
     )
+    # shell.install_deps (Phase 13): hard timeout on the dependency
+    # provisioning subprocess (venv creation + pip install). If this fires
+    # the task takes the dependency_install_failed path, NOT tests_error —
+    # a hang resolving dependencies is not a test failure the Debugger can
+    # classify, and it must never burn a replan debugging it.
+    install_timeout_seconds: float = Field(
+        default=150.0,
+        description=(
+            "Timeout for the dependency-install subprocess "
+            "(env: INSTALL_TIMEOUT_SECONDS)."
+        ),
+    )
     # Reviewer + Security agents (Phase 9): hard caps on their read-only
     # investigation tool calls before a forced verdict. Models per role env
     # vars (LLM_MODEL_REVIEWER, LLM_MODEL_SECURITY).

@@ -127,6 +127,20 @@ class WorktreeManager:
             run_git(clone, "branch", "-D", wt.branch_name, check=False)
         shutil.rmtree(path, ignore_errors=True)
 
+        # Phase 13: the task's venv lives ALONGSIDE the worktree (same
+        # lifecycle guarantee — Section J's discard-and-recreate must reset
+        # dependencies too, never leak them across task attempts). Derived
+        # from repository/task ids, so an orphaned venv is always recomputable.
+        try:
+            from app.shell.provision import venv_path_for
+
+            venv = venv_path_for(wt.repository_id, wt.task_id, self.cache_dir)
+            if venv.exists():
+                shutil.rmtree(venv, ignore_errors=True)
+                logger.info("Venv %s discarded with worktree %s", venv, worktree_id)
+        except Exception:  # noqa: BLE001 — teardown must never block the discard
+            logger.exception("venv cleanup failed for worktree %s", worktree_id)
+
         wt.status = "discarded"
         self.db.commit()
         logger.info("Worktree %s discarded", worktree_id)

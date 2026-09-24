@@ -202,3 +202,62 @@ def test_tester_requires_db() -> None:
     except TestError:
         return
     raise AssertionError("TestAgent without a DB must raise TestError")
+
+
+def test_install_failure_short_circuits_no_test_run(db_session, tmp_path, monkeypatch) -> None:
+    """Phase 13: when dependency provisioning fails (pip nonzero), the run
+    returns ``install_failed``, runs NO tests, and persists NO TestRun — the
+    lifecycle routes that to FAILED(dependency_install_failed), not DEBUGGING."""
+    from app.shell import provision
+    from app.models import ToolCall
+
+    repo_path = make_test_repo(
+        tmp_path,
+        config="[tool.pytest.ini_options]\ntestpaths = ['tests']\n",
+        tests="def test_ok():\n    assert 1 + 1 == 2\n",
+    )
+    repo, task = repo_and_task(db_session, repo_path)
+    worktree = create_worktree(db_session, repo, task)
+    assert repo.install_command == 'pip install -e ".[dev]"'
+
+    def failing_run(argv, *, cwd, timeout_seconds):
+        if "venv" in argv:
+            Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            return 0, "", False, 1, None
+        return 1, "ERROR: No matching distribution found for litellm", False, 3, None
+
+    monkeypatch.setattr(provision, "_run_subprocess", failing_run)
+    result = run(TestAgent().run(task, worktree, ctx_for(task, db_session)))
+
+    assert result.status == "install_failed"
+    assert result.exit_code is None
+
+    # No test ever ran: no TestRun row, and the trace records NO shell.run_test.
+    runs = db_session.scalars(select(TestRun).where(TestRun.task_id == task.id)).all()
+    assert runs == []
+    calls = db_session.scalars(
+        select(ToolCall).where(ToolCall.task_id == task.id)
+    ).all()
+    install_rows = [c for c in calls if c.tool_name == "shell.install_deps"]
+    test_rows = [c for c in calls if c.tool_name == "shell.run_test"]
+    assert install_rows and test_rows == []
+    # The failure was surfaced deterministically (installed=False, exit 1) —
+    # audited on the install row, never as a fabricated FAILED exception.
+    assert install_rows[0].status == "EXECUTED"
+    assert install_rows[0].output["installed"] is False
+    assert install_rows[0].output["exit_code"] == 1
+
+
+def test_parse_test_run_detects_missing_modules() -> None:
+    """The deterministic missing-modules hint (Phase 13): faithful to the
+    traceback, only fires on a real ModuleNotFoundError."""
+    out = (
+        "E   ModuleNotFoundError: No module named 'litellm'\n"
+        "tests/test_x.py:3: in <module>\n"
+    )
+    result = parse_test_run(exit_code=1, output=out, timed_out=False)
+    assert result.status == "error"  # no tests ran, nothing to count
+    assert result.missing_modules == ["litellm"]
+    # No false positives on ordinary output.
+    assert parse_test_run(exit_code=0, output="=== 1 passed ===", timed_out=False
+                          ).missing_modules == []

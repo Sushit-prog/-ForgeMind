@@ -37,6 +37,35 @@ from app.main import create_app  # noqa: E402
 from app.models import Base  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def hermetic_provisioning(monkeypatch):
+    """Phase 13: keep dependency provisioning OFF the network in unit tests.
+
+    Since Phase 13 the Test Agent provisions before every test run, so every
+    suite that drives a REAL pytest subprocess would otherwise trigger a real
+    ``pip install`` inside a real venv. This autouse fixture swaps the
+    provisioner's single subprocess seam (``_run_subprocess``) for a fake
+    that materializes the venv directory (so path/lifecycle logic still
+    runs) and reports a successful install. Tests that probe the provisioner
+    directly override the fake with their own ``monkeypatch``.
+    """
+
+    from app.shell import provision
+
+    def fake_run(argv, *, cwd, timeout_seconds):
+        cmd = [str(a) for a in argv]
+        if "venv" in cmd:
+            venv_arg = cmd[-1]
+            from pathlib import Path
+
+            Path(venv_arg).mkdir(parents=True, exist_ok=True)
+            return 0, "(fake) venv created", False, 1, None
+        return 0, "(fake) pip install ok", False, 2, None
+
+    monkeypatch.setattr(provision, "_run_subprocess", fake_run)
+    yield
+
+
 @pytest.fixture()
 def client():
     """TestClient with a fresh schema per test; lifespan runs the DB check.

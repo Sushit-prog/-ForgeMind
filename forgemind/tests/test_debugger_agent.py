@@ -398,3 +398,38 @@ def test_more_informative_and_inconsistency_logic() -> None:
         first_error, FakeRun(status="error", exit_code=None, timed_out=True)
     )
     assert consistent is None
+
+
+def test_missing_modules_hint_reaches_classification_messages() -> None:
+    """Phase 13 diagnostic: when the run's output names unresolved modules,
+    the deterministic hint is injected into the classification prompt as
+    DATA (never as instructions) — steering DEPENDENCY_FAILURE without any
+    LLM judgment."""
+    from app.agents.debugger.prompt import build_debugger_messages
+
+    task = Task(objective="run the suite")
+    result = TestResult(
+        status="error",
+        exit_code=1,
+        missing_modules=["litellm", "responses"],
+    )
+
+    class FakeSummary:
+        commit_sha = "abc123"
+        files_changed = ["src/app.py"]
+
+        @property
+        def summary(self):
+            return "did the work"
+
+    messages = build_debugger_messages(task, result, FakeSummary())
+    user = messages[1].content
+    assert "MISSING MODULES" in user
+    assert "litellm" in user
+    assert "responses" in user
+
+    # The hint is data-only and absent when nothing is missing.
+    clean = build_debugger_messages(
+        task, TestResult(status="error", exit_code=1), FakeSummary()
+    )
+    assert "MISSING MODULES" not in clean[1].content

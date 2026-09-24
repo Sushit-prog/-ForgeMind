@@ -24,7 +24,15 @@ AGENT_CAPABILITIES: dict[str, frozenset[Capability]] = {
             Capability.SHELL_BUILD,
         }
     ),
-    "test": frozenset({Capability.REPO_READ, Capability.SHELL_TEST}),
+    # Phase 13: the Test Agent provisions per-task dependencies first
+    # (``shell.install_deps``) so ``shell.run_test`` runs against the repo's
+    # own venv, never the worker's global Python. Install failure is its own
+    # TESTING->FAILED(dependency_install_failed) path — distinct from the
+    # DEBUGGING tests_error route. The Debugger Flakiness re-run re-installs
+    # through the Test Agent too (idempotent no-op on an existing venv).
+    "test": frozenset(
+        {Capability.REPO_READ, Capability.SHELL_TEST, Capability.SHELL_INSTALL}
+    ),
     "debugger": frozenset({Capability.REPO_READ, Capability.GIT_READ}),
     "reviewer": frozenset({Capability.REPO_READ, Capability.GIT_READ}),
     "security": frozenset({Capability.REPO_READ, Capability.GIT_READ}),

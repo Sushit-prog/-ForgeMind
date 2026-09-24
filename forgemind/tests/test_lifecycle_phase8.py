@@ -464,3 +464,60 @@ def test_testing_without_tester_fails_cleanly(db_session, tmp_path) -> None:
         )
     )
     assert status == TaskStatus.FAILED
+
+
+def test_testing_install_failure_fails_never_debugging(
+    db_session, tmp_path, monkeypatch
+) -> None:
+    """Phase 13: a dependency-provisioning failure is NOT fed to the Debugger.
+
+    TESTING -> FAILED(dependency_install_failed) directly — the suite could
+    not even run, so re-running/debugging it (the tests_error path) would
+    burn replans on a missing dependency. The task still recovers/escalates
+    through the normal FAILED->RECOVERING->REPLANNING loop within budget.
+    """
+    from app.shell import provision
+
+    repo = make_repo(tmp_path, test_asserts="VALUE = 2")
+    task = make_task(db_session, repo)
+    a = agents()
+
+    # Walk to TESTING. Discovery (during research worktree creation) detects
+    # install_command from pyproject.toml; force pip to fail at TEST time.
+    def failing_run(argv, *, cwd, timeout_seconds):
+        if "venv" in argv:
+            Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            return 0, "", False, 1, None
+        return 1, "ERROR: No matching distribution found for litellm", False, 3, None
+
+    monkeypatch.setattr(provision, "_run_subprocess", failing_run)
+
+    status = None
+    for _ in range(6):
+        status = drive(db_session, task, a)
+        db_session.expire_all()
+        task = db_session.get(Task, task.id)
+        if status in (TaskStatus.FAILED, TaskStatus.DEBUGGING):
+            break
+    assert status == TaskStatus.FAILED
+
+    from app.models import ExecutionEvent
+
+    events = db_session.scalars(
+        select(ExecutionEvent).where(ExecutionEvent.task_id == task.id)
+    ).all()
+    trail = [(e.from_status, e.to_status) for e in events]
+    assert ("TESTING", "FAILED") in trail
+    assert ("TESTING", "DEBUGGING") not in trail  # never the tests_error path
+    testing_events = [e for e in events if e.from_status == "TESTING"]
+    assert testing_events[-1].reason == "dependency_install_failed"
+
+    # No test ever ran, so no TestRun and no Debugger classification.
+    from app.models import FailureClassification as ClassificationRow
+
+    assert not db_session.scalars(
+        select(TestRun).where(TestRun.task_id == task.id)
+    ).all()
+    assert not db_session.scalars(
+        select(ClassificationRow).where(ClassificationRow.task_id == task.id)
+    ).all()

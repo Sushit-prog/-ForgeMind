@@ -39,6 +39,7 @@ class RepositoryDiscovery:
         """
         clone_path = self._ensure_clone(repository)
         self._ensure_test_command(repository, clone_path)
+        self._ensure_install_command(repository, clone_path)
         return clone_path
 
     def _ensure_clone(self, repository: Repository) -> Path:
@@ -129,6 +130,33 @@ class RepositoryDiscovery:
             "Detected test_command %r for repository %s", command, repository.url
         )
 
+    def _ensure_install_command(self, repository: Repository, clone_path: Path) -> None:
+        """Detect + validate ``repositories.install_command`` at discovery
+        time (Phase 13).
+
+        The install command is a SERVER-SIDE value, never agent input:
+        detected from the repo's own setup files via a fixed marker table,
+        validated against the ``install_policy`` allowlist HERE — a value
+        that fails validation is rejected loudly and never stored. When no
+        install setup is detected the field stays None and ``shell.install_deps``
+        cleanly SKIPS provisioning (nothing to install), rather than running
+        the suite on a half-baked environment or erroring spuriously.
+        """
+        if repository.install_command is not None:
+            return
+        command = detect_install_command(clone_path)
+        if command is None:
+            return
+        from app.shell.install_policy import validate_install_command
+
+        validate_install_command(command)  # fails loudly, never stores a bad value
+        repository.install_command = command
+        logger.info(
+            "Detected install_command %r for repository %s",
+            command,
+            repository.url,
+        )
+
     def default_branch(self, clone_path: Path) -> str:
         """The remote default branch name (origin/HEAD, then main/master)."""
         try:
@@ -162,6 +190,7 @@ class RepositoryDiscovery:
             "test_command": repository.test_command,
             "lint_command": repository.lint_command,
             "build_command": repository.build_command,
+            "install_command": repository.install_command,
         }
 
 
@@ -206,3 +235,37 @@ def detect_test_command(clone_path: Path) -> str | None:
 def clone_cache_dir_for(repository_id: uuid.UUID, cache_dir: Path) -> Path:
     """Convenience: where a repository's clone lives under ``cache_dir``."""
     return cache_dir / "clones" / str(repository_id)
+
+
+# Marker file -> detected install command (Phase 13). Same deterministic,
+# conservative posture as the test-command table: a marker exists, the
+# command is chosen from a fixed table — nothing agent/LLM-derived — and
+# every candidate must pass ``install_policy.validate_install_command``
+# before it is stored. Project dev/test extras are the Phase-13 default:
+# ``pip install -e .[dev]`` makes a repo's OWN test dependencies (e.g.
+# pytest, responses) resolvable inside the per-task venv. Only Python
+# today; npm/go/cargo installs arrive with their own probe commands.
+INSTALL_COMMAND_MARKERS: list[tuple[str, str]] = [
+    ("pyproject.toml", 'pip install -e ".[dev]"'),
+]
+
+
+def detect_install_command(clone_path: Path) -> str | None:
+    """Detect the repository's dependency-install command from its setup files.
+
+    Markers are read from the git TREE of HEAD (the clone is ``--no-checkout``,
+    mirroring ``detect_test_command``). Returns None when no install setup is
+    present — provisioning then cleanly skips.
+    """
+    try:
+        listed = run_git(
+            clone_path, "ls-tree", "--name-only", "HEAD"
+        ).stdout.splitlines()
+    except GitOperationError:
+        logger.warning("install-command detection: cannot list tree of %s", clone_path)
+        return None
+    names = {line.strip() for line in listed}
+    for marker, command in INSTALL_COMMAND_MARKERS:
+        if marker in names:
+            return command
+    return None

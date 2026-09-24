@@ -15,12 +15,14 @@ EXPECTED_NAMES = {
     "git.write",
     "shell.test",
     "shell.build",
+    # Phase 13: dependency provisioning — own capability for shell.install_deps.
+    "shell.install",
     "github.read",
     "github.write",
     "github.merge",
 }
 
-# Section H, verbatim.
+# Section H, verbatim (Phase 13 adds shell.install to the Test Agent).
 EXPECTED_ASSIGNMENTS = {
     "research": {"repo.read", "git.read", "github.read"},
     "developer": {
@@ -31,7 +33,7 @@ EXPECTED_ASSIGNMENTS = {
         "shell.test",
         "shell.build",
     },
-    "test": {"repo.read", "shell.test"},
+    "test": {"repo.read", "shell.test", "shell.install"},
     "debugger": {"repo.read", "git.read"},
     "reviewer": {"repo.read", "git.read"},
     "security": {"repo.read", "git.read"},

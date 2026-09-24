@@ -62,6 +62,12 @@ def build_debugger_messages(
     failures = [
         {"test": f.test, "output": f.output[:2000]} for f in test_result.failures
     ]
+    missing_note = ""
+    if getattr(test_result, "missing_modules", None):
+        missing_note = (
+            "\nMISSING MODULES (DETERMINISTIC HINT — the output names these imports"
+            f" as unresolved): {', '.join(test_result.missing_modules)}\n"
+        )
     user = f"""<reference_data>
 TASK OBJECTIVE (DATA):
 {task.objective}
@@ -71,7 +77,7 @@ status={test_result.status}
 exit_code={test_result.exit_code}
 passed={test_result.passed} failed={test_result.failed}
 failures={json.dumps(failures, ensure_ascii=False)}
-
+{missing_note}
 IMPLEMENTATION SUMMARY (DATA):
 commit={implementation.commit_sha}
 files_changed={json.dumps(implementation.files_changed)}

@@ -6,6 +6,13 @@ exit code + structured output — into status/counts/failures. ``status`` is
 ``error`` (the run itself errored: timeout, no tests collected, command
 not configured). ``error`` is deliberately distinct from ``failed`` so the
 Debugger can tell a hung suite from a clean failing exit code.
+
+``install_failed`` (Phase 13) is NOT a test-run outcome at all: it is the
+Test Agent's signal when dependency provisioning (``shell.install_deps``)
+could not be produced, which the lifecycle maps to
+``TESTING -> FAILED(dependency_install_failed)`` — never DEBUGGING. No
+TestRun is persisted for it (no test ran); the reason lives on the
+transition event and the install output on the install tool's audit row.
 """
 
 from __future__ import annotations
@@ -15,7 +22,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-TestRunStatus = Literal["passed", "failed", "error"]
+TestRunStatus = Literal["passed", "failed", "error", "install_failed"]
 
 # pytest summary lines: "=== 1 failed, 2 passed in 0.5s ===" / "=== 3 passed ==="
 _SUMMARY_RE = re.compile(
@@ -23,6 +30,10 @@ _SUMMARY_RE = re.compile(
 )
 # pytest short-summary failure lines: "FAILED tests/test_app.py::test_v - AssertionError: ..."
 _FAILED_LINE_RE = re.compile(r"^FAILED\s+(.+?)\s+-\s+(.*)$")
+# Python "No module named X" traceback lines (Phase 13 diagnostic aid).
+_MISSING_MODULE_RE = re.compile(
+    r"ModuleNotFoundError:\s*No module named ['\"]([^'\"]+)['\"]"
+)
 
 
 class FailureDetail(BaseModel):
@@ -37,6 +48,10 @@ class TestResult(BaseModel):
     failures: list[FailureDetail] = Field(default_factory=list)
     duration_ms: int = Field(default=0, ge=0)
     exit_code: int | None = None
+    # Phase 13 diagnostic: module names the output reports as missing. A
+    # deterministic helper (not an LLM judgment) that steadies the Debugger's
+    # DEPENDENCY_FAILURE classification — it is an AID, never a router.
+    missing_modules: list[str] = Field(default_factory=list)
 
 
 def parse_test_run(
@@ -95,7 +110,24 @@ def parse_test_run(
         failures=failures,
         duration_ms=0,
         exit_code=exit_code,
+        missing_modules=detect_missing_modules(output),
     )
+
+
+def detect_missing_modules(output: str) -> list[str]:
+    """Module names a ``ModuleNotFoundError`` traceback reports as missing.
+
+    Deterministic and defense-in-depth only: after always-on provisioning
+    this should rarely fire, but when it does (a dep the install command
+    does not cover) the Debugger gets a concrete name instead of re-reading
+    raw output — steering toward DEPENDENCY_FAILURE, never a DEBUGGING loop.
+    """
+    names: list[str] = []
+    for match in _MISSING_MODULE_RE.finditer(output):
+        name = match.group(1)
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def _counts(output: str) -> dict[str, int]:
@@ -125,4 +157,5 @@ def result_from_row(row) -> TestResult:
         failures=failures,
         duration_ms=row.duration_ms,
         exit_code=row.exit_code,
+        missing_modules=detect_missing_modules(getattr(row, "output", None) or ""),
     )

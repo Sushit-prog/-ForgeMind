@@ -688,6 +688,20 @@ async def _run_testing(db: Session, task: Task, tester) -> TaskStatus:
         return _cas_transition(
             db, task.id, TaskStatus.TESTING, TaskStatus.REVIEWING, "tests_passed"
         )
+    if result.status == "install_failed":
+        # Phase 13: dependency provisioning failed (venv create, pip, timeout,
+        # mis-stored install_command). This is NOT the tests_error/DEBUGGING
+        # path — re-running the suite cannot resolve a missing dependency, so
+        # it must not burn Debugger replans on it. FAILED routes through the
+        # normal recovery loop, so a PERMANENT install failure escalates
+        # within the replan budget instead of looping forever.
+        logger.error(
+            "Task %s -> FAILED (dependency_install_failed)", task.id
+        )
+        return _cas_transition(
+            db, task.id, TaskStatus.TESTING, TaskStatus.FAILED,
+            "dependency_install_failed",
+        )
     logger.info(
         "Task %s -> DEBUGGING (tests %s: %d failed)",
         task.id,

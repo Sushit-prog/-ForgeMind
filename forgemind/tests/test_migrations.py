@@ -83,7 +83,17 @@ def test_migrations_downgrade_removes_merge_columns() -> None:
         assert {"base_sha", "merged_at", "merge_commit_sha"} <= pr_cols
         engine.dispose()
 
-        # Downgrade exactly one revision (drops the Phase 12 columns).
+        # Downgrade one step: Phase 13's repositories.install_command goes,
+        # while the Phase 12 merge columns are still attached.
+        command.downgrade(cfg, "-1")
+        engine = create_engine(url)
+        repo_cols = {c["name"] for c in inspect(engine).get_columns("repositories")}
+        pr_cols = {c["name"] for c in inspect(engine).get_columns("pull_requests")}
+        assert "install_command" not in repo_cols
+        assert "merged_at" in pr_cols  # still present at the Phase 12 head
+        engine.dispose()
+
+        # Downgrade one more step (drops the Phase 12 columns).
         command.downgrade(cfg, "-1")
         engine = create_engine(url)
         pr_cols = {c["name"] for c in inspect(engine).get_columns("pull_requests")}
