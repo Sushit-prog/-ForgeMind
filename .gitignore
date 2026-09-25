@@ -1,2 +1,10 @@
-# Local tooling (not part of the project)
-.qodo/
+# Runtime artifacts (worker.pid is produced in the repo root on Windows)
+worker.pid
+*.log
+task_payload.json
+
+# Local tool workspaces (opencode / Claude / agent skills) — never committed
+.opencode/
+.agents/
+.claude/
+skills-lock.json

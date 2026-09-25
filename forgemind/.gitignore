@@ -15,6 +15,11 @@ venv/
 # Runtime repo cache / per-task worktrees (Phase 4)
 .forgemind/
 
+# Local runtime artifacts (never committed)
+*.log
+worker.pid
+task_payload.json
+
 # Tooling
 .pytest_cache/
 .coverage

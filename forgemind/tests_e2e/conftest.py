@@ -203,6 +203,10 @@ def spawn_worker(env_extra: dict[str, str] | None = None) -> subprocess.Popen:
     env = os.environ.copy()
     env.setdefault("FORGEMIND_MOCK_LLM", "1")
     env.setdefault("FORGEMIND_MOCK_GITHUB", "1")
+    # The FORGEMIND_STEP_DELAY_MS / FORGEMIND_CRASH_AFTER_COMMIT knobs are
+    # ONLY honored under this sentinel (see advance_task._test_knob_int) — a
+    # stray value in a prod .env must stay inert.
+    env.setdefault("FORGEMIND_TEST_MODE", "1")
     if env_extra:
         env.update(env_extra)
     return subprocess.Popen(

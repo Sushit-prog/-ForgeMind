@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
 import uuid
 
 from app.config import get_settings
@@ -76,12 +75,28 @@ def _build_agent(build_fn, label: str):
         return None
 
 
+def _test_knob_int(name: str, default: int = 0) -> int:
+    """Read a test-only integer knob, honoring it ONLY in test mode.
+
+    ``FORGEMIND_TEST_MODE=1`` (set by the e2e harness, never by prod config)
+    must be present or every ``FORGEMIND_*`` test knob is ignored. A stray
+    ``FORGEMIND_STEP_DELAY_MS`` or ``FORGEMIND_CRASH_AFTER_COMMIT`` in a prod
+    .env is therefore inert instead of silently stalling or killing workers.
+    """
+    if os.environ.get("FORGEMIND_TEST_MODE") != "1":
+        return default
+    value = os.environ.get(name)
+    return int(value) if value else default
+
+
 async def advance_task(ctx: dict, task_id: str) -> None:
     """Load the task, apply the next legal transition, persist, re-enqueue."""
-    # Test/ops knob: simulate slow transitions so crash windows are observable.
-    delay_ms = int(os.environ.get("FORGEMIND_STEP_DELAY_MS", "0") or 0)
+    # Test knob (test_mode-gated): simulate slow transitions so crash
+    # windows are observable. asyncio.sleep, not time.sleep — even a
+    # misconfigured test worker thread can't block the event loop.
+    delay_ms = _test_knob_int("FORGEMIND_STEP_DELAY_MS")
     if delay_ms > 0:
-        time.sleep(delay_ms / 1000)
+        await asyncio.sleep(delay_ms / 1000)
 
     task_uuid = uuid.UUID(task_id)
     db = SessionLocal()
@@ -144,12 +159,17 @@ async def advance_task(ctx: dict, task_id: str) -> None:
     finally:
         db.close()
 
-    # Test hook: simulate a crash in the window between the transition
-    # committing and the re-enqueue — exactly what the startup sweep heals.
-    # Never set outside tests. Only fires when a transition actually
-    # committed, so a stale job (task not found, already advanced) cannot
-    # kill the worker before it processes the test's own task.
-    if new_status is not None and os.environ.get("FORGEMIND_CRASH_AFTER_COMMIT") == "1":
+    # Test hook (test_mode-gated): simulate a crash in the window between the
+    # transition committing and the re-enqueue — exactly what the startup
+    # sweep heals. Never honored outside FORGEMIND_TEST_MODE=1. Only fires
+    # when a transition actually committed, so a stale job (task not found,
+    # already advanced) cannot kill the worker before it processes the test's
+    # own task.
+    if (
+        new_status is not None
+        and os.environ.get("FORGEMIND_TEST_MODE") == "1"
+        and os.environ.get("FORGEMIND_CRASH_AFTER_COMMIT") == "1"
+    ):
         logger.warning(
             "FORGEMIND_CRASH_AFTER_COMMIT set — simulating crash after commit"
         )
