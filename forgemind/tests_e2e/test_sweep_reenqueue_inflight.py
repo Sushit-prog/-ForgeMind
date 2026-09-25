@@ -26,6 +26,7 @@ under the real trigger condition, not just under two clean sequential runs.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 
 from arq import create_pool
@@ -33,6 +34,7 @@ from sqlalchemy import select
 
 from app.models import ExecutionEvent, Task, TaskStatus
 from app.runtime.task_lifecycle import AUTO_PIPELINE
+from app.worker.queue import get_redis_settings
 from app.worker.worker import _sweep_pending_tasks
 from tests_e2e.conftest import approve_task, spawn_worker
 
@@ -48,68 +50,81 @@ async def _wait_for_running_job(pool, task_id: str, timeout: float = 20.0) -> li
     RUNNING — presence means a worker has pulled it and the dedup window is
     genuinely open. Returns the observed keys (decoded).
     """
-    deadline = asyncio.get_event_loop().time() + timeout
+    deadline = time.monotonic() + timeout
     while True:
         keys = []
         async for raw in pool.scan_iter(match=f"{_JOB_KEY_PREFIX}{task_id}:*"):
             keys.append(raw.decode())
         if keys:
             return keys
-        if asyncio.get_event_loop().time() >= deadline:
+        if time.monotonic() >= deadline:
             return []
         await asyncio.sleep(0.05)
 
 
-async def _inject_raced_deliveries(pool, task_id: str, db_session) -> None:
+async def _replay_raced_deliveries(task_id: str, db_session) -> None:
     """Re-play the two historical duplicate sources against the in-flight job.
 
-    Observed mid-flight, so the running job's id encodes the status it is
-    ABOUT to transition out of: ``advance:{task_id}:{FROM}``. Both the
-    app-level duplicate enqueue and the startup sweep target that same id —
-    exactly the race that used to deadlock. Either one breaking the dedup is
-    asserted loudly; the pipeline's later completion is the behavioral proof.
+    All Redis/async work for the whole race lives in ONE event loop: the arq
+    pool's connections are bound to the loop that created them (Proactor
+    sockets cannot cross ``asyncio.run()`` boundaries on Windows).
+
+    Observed mid-flight, the running job's id encodes the status it is ABOUT
+    to transition out of: ``advance:{task_id}:{FROM}``. Both the app-level
+    duplicate enqueue and the startup sweep target that same id — exactly the
+    race that used to deadlock. Either one breaking the dedup is asserted
+    loudly; the pipeline's later completion is the behavioral proof.
     """
     import app.worker.queue as q
 
-    keys = await _wait_for_running_job(pool, task_id)
-    assert keys, "worker never reached an in-flight job window"
+    pool = await create_pool(get_redis_settings())
+    try:
+        keys = await _wait_for_running_job(pool, task_id)
+        assert keys, "worker never reached an in-flight job window"
 
-    observed_live = keys[0]
-    from_status = observed_live.split(":")[-1]
+        from_status = keys[0].split(":")[-1]
 
-    # Sample the DB in the same window: the observed status must equal the
-    # task's committed status, i.e. the job holding it is at that step.
-    db_session.expire_all()
-    current = TaskStatus(db_session.get(Task, uuid.UUID(task_id)).status)
-    assert current.value == from_status, (
-        f"observed in-flight status {from_status} != DB {current.value} — "
-        "the observed job could not have been holding this step"
-    )
+        # Sample the DB in the same window: the observed status must equal
+        # the task's committed status, i.e. the job holding it is at that step.
+        db_session.expire_all()
+        current = TaskStatus(db_session.get(Task, uuid.UUID(task_id)).status)
+        assert current.value == from_status, (
+            f"observed in-flight status {from_status} != DB {current.value} — "
+            "the observed job could not have been holding this step"
+        )
 
-    # 1) App-level duplicate: the exact path POST /tasks uses.
-    dup = await pool.enqueue_job(
-        q.JOB_ADVANCE_TASK, task_id, _job_id=q.advance_job_id(task_id, from_status)
-    )
-    assert dup is None, (
-        f"duplicate enqueue of in-flight id advance:{task_id}:{from_status} "
-        "was NOT deduped — this is the duplicate-delivery bug"
-    )
+        # 1) App-level duplicate: the exact enqueue_job op POST /tasks makes
+        # (enqueue_advance_task -> pool.enqueue_job with the same _job_id).
+        dup = await pool.enqueue_job(
+            q.JOB_ADVANCE_TASK, task_id, _job_id=q.advance_job_id(task_id, from_status)
+        )
+        assert dup is None, (
+            f"duplicate enqueue of in-flight id advance:{task_id}:{from_status} "
+            "was NOT deduped — this is the duplicate-delivery bug"
+        )
 
-    # 2) The same enqueue_advance_task wrapper POST /tasks runs.
-    await q.enqueue_advance_task(uuid.UUID(task_id), target_status=from_status)
+        # 2) A second redundant app-level delivery of the same step.
+        dup2 = await pool.enqueue_job(
+            q.JOB_ADVANCE_TASK,
+            task_id,
+            _job_id=q.advance_job_id(task_id, from_status),
+        )
+        assert dup2 is None, "second redundant delivery escaped dedup as well"
 
-    # 3) Startup sweep re-enqueuing every non-terminal task — the second
-    # half of the historical deadlock.
-    await _sweep_pending_tasks({"redis": pool})
+        # 3) Startup sweep re-enqueuing every non-terminal task — the second
+        # half of the historical deadlock.
+        await _sweep_pending_tasks({"redis": pool})
+    finally:
+        await pool.aclose()
 
 
 def test_inflight_duplicate_and_sweep_reenqueue_are_swallowed(
     client, db_session, source_repo
 ) -> None:
-    # Windowed worker: every step sleeps at job start, so the running
-    # job_key stays alive long enough to re-play the raced deliveries.
+    # Windowed worker: every step sleeps at job start (asyncio.sleep, gated
+    # behind FORGEMIND_TEST_MODE=1), so the running job_key stays alive long
+    # enough to re-play the raced deliveries.
     proc = spawn_worker({"FORGEMIND_STEP_DELAY_MS": "2000"})
-    pool = None
     try:
         created = client.post(
             "/tasks",
@@ -122,8 +137,7 @@ def test_inflight_duplicate_and_sweep_reenqueue_are_swallowed(
         ).json()
         task_id = str(created["id"])
 
-        pool = asyncio.run(create_pool(get_redis_settings()))
-        asyncio.run(_inject_raced_deliveries(pool, task_id, db_session))
+        asyncio.run(_replay_raced_deliveries(task_id, db_session))
 
         # The worker kept the ORIGINAL job: the pipeline must still complete
         # with one exact transition per step — no double-processing.
@@ -146,16 +160,6 @@ def test_inflight_duplicate_and_sweep_reenqueue_are_swallowed(
         task = db_session.get(Task, uuid.UUID(task_id))
         assert task.replan_count == 0
     finally:
-        if pool is not None:
-            asyncio.run(_flush_redis(pool))
         if proc.poll() is None:
             proc.terminate()
             proc.wait(timeout=10)
-
-
-async def _flush_redis(pool) -> None:
-    """Best-effort queue flush so a stray injected job can't leak across tests."""
-    try:
-        await pool.flushdb()
-    finally:
-        await pool.aclose()

@@ -23,6 +23,7 @@ must invoke through ``asyncio.to_thread``, exactly like ``CommandRunner``.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -217,7 +218,17 @@ def install_dependencies(
 
     # First token is the validated binary name; run it as the venv's own
     # binary (argv[0] rewritten), never PATH — deterministic, no lookup.
-    pip_bin = venv / "bin" / "pip"
+    # The venv layout differs by platform: ``bin/pip`` on POSIX,
+    # ``Scripts/pip.exe`` on Windows. ``venv_bin_dir`` already returns the
+    # right directory for the canonical ``pyvenv.cfg`` marker.
+    bin_dir = venv_bin_dir(venv)
+    if bin_dir is None:
+        return ProvisionResult(
+            installed=False,
+            error="venv created without a bin/Scripts directory",
+        )
+    pip_name = "pip.exe" if os.name == "nt" else "pip"
+    pip_bin = bin_dir / pip_name
     argv = [str(pip_bin), *tokens[1:]]
 
     exit_code, output, timed_out, duration_ms, error = _run_subprocess(
