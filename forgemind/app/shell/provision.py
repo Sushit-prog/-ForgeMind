@@ -65,6 +65,21 @@ class ProvisionResult:
         self.error = error
 
 
+def _decode_capture(capture: str | bytes | None) -> str:
+    """Normalize a subprocess capture to text.
+
+    With ``text=True`` normal captures are ``str``, but on ``TimeoutExpired``
+    the interrupted reader thread can surface raw ``bytes`` — concatenating
+    them with ``""`` then raises ``TypeError: can't concat str to bytes`` and
+    crashes the whole provisioning step. Decode defensively instead.
+    """
+    if capture is None:
+        return ""
+    if isinstance(capture, bytes):
+        return capture.decode("utf-8", errors="replace")
+    return capture
+
+
 def _run_subprocess(
     argv: list[str], *, cwd: Path, timeout_seconds: float
 ) -> tuple[int | None, str, bool, int, str | None]:
@@ -86,13 +101,13 @@ def _run_subprocess(
         )
     except subprocess.TimeoutExpired as exc:
         duration = int((time.perf_counter() - started) * 1000)
-        partial = (exc.stdout or "") + (exc.stderr or "")
+        partial = _decode_capture(exc.stdout) + _decode_capture(exc.stderr)
         return None, partial, True, duration, None
     except OSError as exc:
         duration = int((time.perf_counter() - started) * 1000)
         return None, "", False, duration, f"failed to run command: {exc}"
     duration = int((time.perf_counter() - started) * 1000)
-    output = (proc.stdout or "") + (proc.stderr or "")
+    output = _decode_capture(proc.stdout) + _decode_capture(proc.stderr)
     return proc.returncode, output, False, duration, None
 
 

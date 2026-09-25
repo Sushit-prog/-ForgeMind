@@ -22,6 +22,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import os
+import re
 from pathlib import Path
 
 from app.git.errors import PathTraversalError, WorktreeNotFoundError
@@ -30,6 +31,27 @@ from app.repository.models import SearchMatch
 logger = logging.getLogger(__name__)
 
 MAX_SEARCH_RESULTS = 100
+
+_LONE_SURROGATE_RE = re.compile(
+    r"[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]"
+)
+
+
+def sanitize_text(text: str) -> str:
+    """Scrub worktree text before it can be persisted.
+
+    PostgreSQL JSONB cannot store ``\\u0000`` — even as a valid ``\\u0000``
+    escape it is rejected with \u201cunsupported Unicode escape sequence\u201d
+    (SQLSTATE 22P05) — nor lone surrogates. Binary artifacts (a task's own
+    test bytecode, ``*.db`` files) pass through ``errors="replace"`` as NUL
+    bytes, so they are replaced with U+FFFD here, at the ingest boundary,
+    before any tool result or artifact could carry one to a JSONB column.
+    Valid surrogate pairs are left untouched. This is also the shared scrub
+    used by the persistence boundary (``ToolPipeline``) and shell output.
+    """
+    if "\x00" not in text and not _LONE_SURROGATE_RE.search(text):
+        return text
+    return _LONE_SURROGATE_RE.sub("\ufffd", text.replace("\x00", "\ufffd"))
 
 
 class FileAccess:
@@ -68,7 +90,7 @@ class FileAccess:
         path = self._resolve(relative_path)
         if not path.is_file():
             raise FileNotFoundError(f"not a file in worktree: {relative_path}")
-        return path.read_text(encoding="utf-8", errors="replace")
+        return sanitize_text(path.read_text(encoding="utf-8", errors="replace"))
 
     def write_file(self, relative_path: str, content: str) -> bool:
         """Write ``content`` to ``relative_path`` inside the root.
@@ -128,7 +150,9 @@ class FileAccess:
                     if needle in line.lower():
                         matches.append(
                             SearchMatch(
-                                path=rel, line=lineno, snippet=line.strip()[:200]
+                                path=rel,
+                                line=lineno,
+                                snippet=sanitize_text(line.strip()[:200]),
                             )
                         )
                         if len(matches) >= MAX_SEARCH_RESULTS:

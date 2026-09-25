@@ -194,6 +194,82 @@ def test_raising_tool_records_failed_row(pipeline, db_session) -> None:
     assert rows[0].latency_ms is not None
 
 
+class TextOutput(BaseModel):
+    value: str
+
+
+class NulEchoTool(Tool):
+    """Returns a string containing a NUL byte — the JSONB crash trigger."""
+
+    name = "test.nul_echo"
+    description = "returns a string containing a NUL byte"
+    input_schema = _Input
+    output_schema = TextOutput
+    risk = "LOW"
+
+    async def execute(self, input: _Input, ctx: ExecutionContext) -> TextOutput:
+        return TextOutput(value="a\x00b")
+
+
+def test_nul_in_tool_output_scrubbed_from_audit_row(pipeline, db_session) -> None:
+    """NUL survives errors="replace" in file reads / shell output; it must not
+    reach a persisted JSONB value (Postgres 22P05). The callers see the
+    scrubbed value too, so the LLM never receives NUL-laced observations."""
+    pipeline.registry = registry_with(NulEchoTool())
+    result = run(pipeline.invoke("test.nul_echo", {"value": "x"}, set(), CTX))
+    assert result.status == "EXECUTED"
+    assert result.output == {"value": "a\ufffdb"}
+    row = rows_for(db_session, "test.nul_echo")[0]
+    assert row.output == {"value": "a\ufffdb"}
+
+
+def test_nul_in_input_scrubbed_from_denied_row(pipeline, db_session) -> None:
+    result = run(
+        pipeline.invoke("example.read_file", {"path": "a\x00b"}, set(), CTX)
+    )
+    assert result.status == "DENIED"
+    assert "repo.read" in result.denial_reason
+    row = rows_for(db_session, "example.read_file")[0]
+    assert row.input == {"path": "a\ufffdb"}
+
+
+def test_dbapi_error_during_audit_flush_fails_row_and_survives(
+    pipeline, db_session, monkeypatch
+) -> None:
+    """A DB-level reject (JSONB refusing \\u0000) on the audit flush must be
+    absorbed: rollback FIRST (so the session is not poisoned into
+    PendingRollbackError), then re-mark the row FAILED and persist it. The
+    agent sees a FAILED ToolResult and its session stays usable — the task
+    never strands."""
+    from sqlalchemy.exc import DBAPIError
+
+    real_flush = pipeline.db.flush
+    calls = {"n": 0}
+
+    def flaky_flush():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise DBAPIError(
+                "INSERT INTO tool_calls", {},
+                RuntimeError("unsupported Unicode escape sequence"),
+            )
+        real_flush()
+
+    monkeypatch.setattr(pipeline.db, "flush", flaky_flush)
+    result = run(pipeline.invoke("example.echo", {"message": "hi"}, set(), CTX))
+    assert result.status == "FAILED"
+    assert "failed to persist tool audit row" in result.error
+
+    rows = rows_for(db_session, "example.echo")
+    assert len(rows) == 1
+    assert rows[0].status == "FAILED"
+    assert "failed to persist tool audit row" in rows[0].output["error"]
+
+    # Session is usable afterwards — no PendingRollbackError poisoning the
+    # agent loop or the run's CAS transition.
+    assert db_session.scalar(select(func.count()).select_from(ToolCall)) == 1
+
+
 # --- contract errors --------------------------------------------------------
 
 

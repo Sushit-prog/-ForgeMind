@@ -16,6 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from app.repository.file_access import sanitize_text
 from app.shell.command_policy import TestCommandError, validate_test_command
 
 # Upper bound on captured output (defense against a test that floods stdout).
@@ -35,7 +36,7 @@ class CommandResult:
         error: str | None = None,
     ) -> None:
         self.exit_code = exit_code
-        self.output = output[:MAX_CAPTURED_OUTPUT]
+        self.output = sanitize_text(output[:MAX_CAPTURED_OUTPUT])
         self.timed_out = timed_out
         self.duration_ms = duration_ms
         self.error = error

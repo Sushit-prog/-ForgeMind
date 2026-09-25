@@ -333,3 +333,64 @@ def test_run_test_falls_back_to_ambient_path_without_a_venv(
 
     assert result.exit_code == 0
     assert captured["env"] is None  # pristine env — ambient PATH resolution
+
+
+# Captured at import time, BEFORE the conftest autouse fixture swaps the
+# module-level seam for a hermetic fake — the REAL subprocess path.
+_REAL_RUN_SUBPROCESS = provision._run_subprocess
+
+
+def test_timeout_with_bytes_capture_does_not_crash(tmp_path, monkeypatch) -> None:
+    """A ``TimeoutExpired`` whose streams surface as ``bytes`` must decode
+    cleanly — the interrupted reader thread can skip text decoding, and the
+    old ``(exc.stdout or "") + (exc.stderr or "")`` then raised
+    ``TypeError: can't concat str to bytes``, crashing the whole
+    provisioning step instead of reporting a timed-out FAILED."""
+    import subprocess
+
+    stdout = b"Collecting pip\n  Downloading pip 25.0 ..."
+    stderr = "fatal: the remote end hung up unexpectedly"
+
+    def explosive_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=stdout, stderr=stderr)
+
+    monkeypatch.setattr(provision.subprocess, "run", explosive_run)
+    exit_code, output, timed_out, duration_ms, error = _REAL_RUN_SUBPROCESS(
+        ["/fake/pip", "install", "."], cwd=tmp_path, timeout_seconds=150.0
+    )
+
+    assert exit_code is None
+    assert output == stdout.decode("utf-8") + stderr  # str + str, not a crash
+    assert timed_out is True
+    assert error is None
+
+
+def test_decode_capture_normalizes_mixed_streams() -> None:
+    assert provision._decode_capture(None) == ""
+    assert provision._decode_capture("already text") == "already text"
+    assert provision._decode_capture(b"raw bytes") == "raw bytes"
+
+
+def test_install_dependencies_surfaces_timeout_cleanly(
+    db_session, tmp_path, monkeypatch
+) -> None:
+    """End-to-end: a timed-out install yields a clean FAILED —
+    installed=False, timed_out=True, no exception."""
+    repo_path = make_repo(tmp_path, with_pyproject=True)
+    repo, task = repo_and_task(db_session, repo_path)
+    wt = make_worktree(db_session, repo, task)
+    pending(db_session)
+
+    def venv_then_timeout(argv, *, cwd, timeout_seconds):
+        if "venv" in argv:
+            Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            return 0, "(fake) venv created", False, 1, None
+        return None, "partial log", True, 150000, None
+
+    monkeypatch.setattr(provision, "_run_subprocess", venv_then_timeout)
+    result = install_dependencies(db_session, wt.id)
+
+    assert result.installed is False
+    assert result.timed_out is True
+    assert result.error is None
+    assert "partial log" in result.output

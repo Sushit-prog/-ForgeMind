@@ -252,6 +252,11 @@ class ResearchAgent(Agent):
             )
         except Exception as exc:  # noqa: BLE001 — pre-execution contract errors
             logger.warning("research tool %s raised: %s", call.tool, exc)
+            # A failed flush leaves the session in pending-rollback state;
+            # rollback here so the rest of research (and the run's CAS
+            # transition) keeps working instead of raising
+            # PendingRollbackError and stranding the task.
+            db.rollback()
             return (
                 Observation(
                     tool=call.tool, status="FAILED", input=tool_input, error=str(exc)

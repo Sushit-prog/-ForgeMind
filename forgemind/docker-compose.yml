@@ -32,22 +32,35 @@ services:
   worker:
     build: .
     container_name: forgemind-worker
+    # .env carries GITHUB_TOKEN (PR_CREATION needs the real GitHub client)
+    # plus worker tuning; the environment: block below overrides it for the
+    # service endpoints, which stay pointed at the compose db/redis.
+    env_file: .env
     # Migrate on boot (env.py reads DATABASE_URL), then run the arq worker.
     command: sh -c "alembic upgrade head && python -m app.worker.worker"
     environment:
       DATABASE_URL: postgresql+psycopg://forgemind:forgemind@db:5432/forgemind
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: INFO
-      # Stub LLM provider so the dev stack works out of the box. When
-      # OPENROUTER_API_KEY is set (e.g. via .env), build_planner prefers the
-      # real provider and this flag is ignored.
-      FORGEMIND_MOCK_LLM: "1"
+      # NO mock flag here: build_provider (app/agents/planner/agent.py) checks
+      # FORGEMIND_MOCK_LLM FIRST and short-circuits to the StubLLMProvider
+      # before any API key is considered. Leaving it out lets .env control the
+      # setting (FORGEMIND_MOCK_LLM=0 -> real providers via OpenRouter/Groq/
+      # NVIDIA, keyed by the OPENROUTER_/GROQ_/NVIDIA_ vars).
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # Repo clones + per-task worktrees (REPO_CACHE_DIR=.forgemind/repos, CWD
+    # is /app) live in the container's writable layer otherwise — a rebuild
+    # or `up -d` recreate wipes them and every worktree tool then fails
+    # "worktree directory missing". Persist them on a named volume so runs
+    # survive container recreates.
+    volumes:
+      - forgemind_repos:/app/.forgemind/repos
 
 volumes:
   forgemind_pgdata:
+  forgemind_repos:

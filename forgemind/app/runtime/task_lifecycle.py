@@ -400,6 +400,14 @@ def _cas_transition(
     one step fires exactly once, even when two workers run the same agent
     step concurrently.
     """
+    # Rollback-first: a prior agent flush failure can leave this session
+    # pending a rollback, so EVERY statement below would raise
+    # PendingRollbackError and the task would be stranded (arq retries of the
+    # deterministic job id are silently deduped). Agents commit internally,
+    # so no pending work is lost here — a rollback turns an agent crash into
+    # a clean FAILED transition instead of an orphaned task.
+    if db.in_transaction():
+        db.rollback()
     # populate_existing: the session's identity map may already hold the
     # Task (read at job start); FOR UPDATE alone does not refresh it, so
     # without this the check would compare against STALE in-memory state.

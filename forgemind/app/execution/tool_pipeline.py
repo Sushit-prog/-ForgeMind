@@ -36,10 +36,12 @@ import uuid
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.models import ToolCall, ToolCallStatus
 from app.policies.engine import PolicyEngine
+from app.repository.file_access import sanitize_text
 from app.tools.base import ExecutionContext, Tool
 from app.tools.registry import ToolRegistry
 
@@ -77,6 +79,23 @@ def redact_sensitive(value: Any, keys: frozenset[str] = SENSITIVE_KEYS) -> Any:
         }
     if isinstance(value, list):
         return [redact_sensitive(v, keys) for v in value]
+    return value
+
+
+def sanitize_persistable(value: Any) -> Any:
+    """Recursively scrub ``str`` leaves before the audit row is persisted.
+
+    Defense at the persistence boundary: even if the producing tool did not
+    scrub (e.g. raw shell output), a JSONB write can never fail on ``\\u0000``
+    or lone surrogates (Postgres 22P05 \u201cunsupported Unicode escape
+    sequence\u201d). Identity on clean values, so existing rows are unchanged.
+    """
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, dict):
+        return {k: sanitize_persistable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_persistable(v) for v in value]
     return value
 
 
@@ -172,7 +191,9 @@ class ToolPipeline:
             agent_type=ctx.agent_type,
             tool_name=tool.name,
             # mode="json": UUIDs/datetimes become JSON-safe scalars for the row.
-            input=redact_sensitive(validated.model_dump(mode="json")),
+            input=sanitize_persistable(
+                redact_sensitive(validated.model_dump(mode="json"))
+            ),
             status=ToolCallStatus.ALLOWED.value,
             risk=tool.risk,
         )
@@ -190,10 +211,9 @@ class ToolPipeline:
         except Exception as exc:  # noqa: BLE001 — any tool error is a FAILED row
             latency_ms = int((time.perf_counter() - started) * 1000)
             row.status = ToolCallStatus.FAILED.value
-            row.output = {"error": str(exc)}
+            row.output = {"error": sanitize_text(str(exc))}
             row.latency_ms = latency_ms
-            self.db.flush()  # assign id now that execute has returned
-            self.db.commit()  # audit row survives whatever the caller does
+            self._persist_audit(row)
             logger.error("Tool %s failed after %dms: %s", tool_name, latency_ms, exc)
             return ToolResult(
                 tool_name=tool_name,
@@ -204,17 +224,51 @@ class ToolPipeline:
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         row.status = ToolCallStatus.EXECUTED.value
-        row.output = redact_sensitive(output.model_dump(mode="json"))
+        row.output = sanitize_persistable(
+            redact_sensitive(output.model_dump(mode="json"))
+        )
         row.latency_ms = latency_ms
-        self.db.flush()  # assign id now that execute has returned
-        self.db.commit()
+        final_status = self._persist_audit(row)
+        persisted = final_status == ToolCallStatus.EXECUTED.value
         logger.info("Tool %s executed in %dms", tool_name, latency_ms)
         return ToolResult(
             tool_name=tool_name,
-            status="EXECUTED",
-            output=output.model_dump(mode="json"),
+            status="EXECUTED" if persisted else "FAILED",
+            output=sanitize_persistable(output.model_dump(mode="json"))
+            if persisted
+            else None,
+            error=None if persisted else row.output.get("error"),
             latency_ms=latency_ms,
         )
+
+    def _persist_audit(self, row: ToolCall) -> str:
+        """Flush + commit the audit row, absorbing database-level rejects.
+
+        Returns the final row status. On a DB-level error (e.g. PostgreSQL
+        JSONB refusing ``\\u0000``) the session is rolled back FIRST — a
+        failed flush otherwise leaves it in pending-rollback state and every
+        later statement raises ``PendingRollbackError``, killing the task
+        that owned the session — then the row is re-marked FAILED with the
+        DB error and re-persisted. Exactly ONE row survives either way.
+        """
+        try:
+            self.db.flush()
+            self.db.commit()
+            return row.status
+        except DBAPIError as exc:
+            logger.warning(
+                "tool_calls audit persist failed (%s); re-marking FAILED", exc
+            )
+            self.db.rollback()
+            row.status = ToolCallStatus.FAILED.value
+            row.output = {
+                "error": f"failed to persist tool audit row: {sanitize_text(str(exc))}"
+            }
+            row.latency_ms = row.latency_ms or 0
+            self.db.add(row)
+            self.db.flush()
+            self.db.commit()
+            return ToolCallStatus.FAILED.value
 
     def _record_denied(
         self,
@@ -230,7 +284,9 @@ class ToolPipeline:
                 step_id=ctx.step_id,
                 agent_type=ctx.agent_type,
                 tool_name=tool.name,
-                input=redact_sensitive(validated.model_dump(mode="json")),
+                input=sanitize_persistable(
+                    redact_sensitive(validated.model_dump(mode="json"))
+                ),
                 status=ToolCallStatus.DENIED.value,
                 denial_reason=reason,
                 risk=tool.risk,
