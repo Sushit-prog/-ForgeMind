@@ -22,7 +22,7 @@ import asyncio
 
 import pytest
 
-from app.agents.planner.agent import build_provider
+from app.agents.planner.agent import PlannerConfigError, build_provider
 from app.agents.planner.schema import Plan
 from app.config import get_settings
 from app.llm import (
@@ -32,6 +32,7 @@ from app.llm import (
 )
 from app.llm.fallback import FallbackLLMProvider
 from app.llm.mock import DEFAULT_PLAN_RESPONSE, MALFORMED_RESPONSE
+from app.llm.openai_compat import BACKENDS, OpenAICompatibleProvider
 from app.llm.provider import LLMProvider, Message, parse_and_validate
 
 
@@ -343,3 +344,237 @@ def test_build_provider_wires_fallback_chain_from_env(monkeypatch) -> None:
         assert second.model == "cohere/north-mini-code:free"
     finally:
         get_settings.cache_clear()
+
+
+# --- multi-backend wiring (nvidia / openrouter+groq / inception) -------------
+
+# The documented Planner/Developer chain: free NVIDIA NIM first, the existing
+# free OpenRouter/Groq chain second, PAID Inception Mercury last.
+_PRIMARY = "nvidia::nvidia/nemotron-3-ultra-550b-a55b"
+_FALLBACKS = (
+    "nvidia::nvidia/nemotron-3.5-lightning-30b-a3b,"
+    "cohere/north-mini-code:free,"
+    "groq::openai/gpt-oss-120b,"
+    "inception::mercury-2.5"
+)
+
+
+def _wire_chain(monkeypatch, *, role: str, primary: str, fallbacks: str):
+    """Configure ``role`` via env exactly as production would read it.
+
+    Keys are set PRESENT-BUT-EMPTY where absence matters (a real .env in the
+    dev tree carries genuine keys + fallback chains that would otherwise
+    leak through the dotenv layer).
+    """
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
+    monkeypatch.setenv("INCEPTION_API_KEY", "inception-test")
+    monkeypatch.delenv("FORGEMIND_MOCK_LLM", raising=False)
+    monkeypatch.setenv(f"LLM_MODEL_{role.upper()}", primary)
+    monkeypatch.setenv(f"LLM_MODEL_{role.upper()}_FALLBACKS", fallbacks)
+    get_settings.cache_clear()
+    try:
+        return build_provider(role=role)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_split_backend_slug_inception_prefix() -> None:
+    from app.llm.config import split_backend_slug
+
+    assert split_backend_slug("inception::mercury-2.5") == (
+        "inception",
+        "mercury-2.5",
+    )
+
+
+def test_build_provider_wires_nvidia_free_chain_then_inception_last(monkeypatch) -> None:
+    """Planner + Developer build a 5-hop chain across ALL THREE backends,
+    each hop carrying its own backend's base_url + API key, model slugs
+    stripped of their backend prefix, order preserved."""
+    expected_models = [
+        _PRIMARY,
+        "nvidia::nvidia/nemotron-3.5-lightning-30b-a3b",
+        "cohere/north-mini-code:free",
+        "groq::openai/gpt-oss-120b",
+        "inception::mercury-2.5",
+    ]
+    for role in ("planner", "developer"):
+        provider = _wire_chain(monkeypatch, role=role, primary=_PRIMARY, fallbacks=_FALLBACKS)
+
+        assert isinstance(provider, FallbackLLMProvider)
+        assert provider.models == expected_models
+
+        hops = [hop[1] for hop in provider._chain]  # noqa: SLF001
+        assert all(isinstance(hop, OpenAICompatibleProvider) for hop in hops)
+        # Endpoint selection follows the backend prefix of EACH entry.
+        assert [hop.base_url for hop in hops] == [
+            BACKENDS["nvidia"],
+            BACKENDS["nvidia"],
+            BACKENDS["openrouter"],
+            BACKENDS["groq"],
+            BACKENDS["inception"],
+        ]
+        # Key selection follows the backend of EACH entry.
+        assert [hop.api_key for hop in hops] == [
+            "nvapi-test",
+            "nvapi-test",
+            "sk-or-test",
+            "gsk-test",
+            "inception-test",
+        ]
+        # Prefix stripped before it reaches the wire.
+        assert [hop.model for hop in hops] == [
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "cohere/north-mini-code:free",
+            "openai/gpt-oss-120b",
+            "mercury-2.5",
+        ]
+
+
+def test_build_provider_missing_inception_key_fails_loudly(monkeypatch) -> None:
+    """A chain entry whose backend has no key is a config error naming the
+    role, the backend, and the env var — same fail-loud contract as NVIDIA."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("INCEPTION_API_KEY", "")  # present-but-empty beats .env
+    monkeypatch.delenv("FORGEMIND_MOCK_LLM", raising=False)
+    monkeypatch.setenv("LLM_MODEL_PLANNER", "openai/gpt-oss-20b:free")
+    monkeypatch.setenv("LLM_MODEL_PLANNER_FALLBACKS", "inception::mercury-2.5")
+    get_settings.cache_clear()
+
+    try:
+        with pytest.raises(PlannerConfigError) as exc_info:
+            build_provider(role="planner")
+    finally:
+        get_settings.cache_clear()
+
+    text = str(exc_info.value)
+    assert "role 'planner'" in text
+    assert "backend 'inception'" in text
+    assert "INCEPTION_API_KEY" in text
+
+
+# --- malformed output, whatever backend produced it --------------------------
+
+
+class _FakeResponse:
+    def __init__(self, content: str) -> None:
+        self.status_code = 200
+        self.text = ""
+        self._payload = {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+
+    def json(self):
+        return self._payload
+
+
+def _patch_http(monkeypatch, *contents: str) -> list[str]:
+    """Record every chat/completions URL, answering each with the next
+    content string (the LAST one repeats). Patches compat.httpx.AsyncClient —
+    the shared httpx module object — so ALL backends are redirected."""
+    import app.llm.openai_compat as compat
+
+    queue = list(contents)
+    urls: list[str] = []
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            urls.append(url)
+            content = queue.pop(0) if len(queue) > 1 else queue[0]
+            return _FakeResponse(content)
+
+    monkeypatch.setattr(compat.httpx, "AsyncClient", lambda **kw: _Client())
+    return urls
+
+
+def test_malformed_output_exhaustion_typed_malformed_on_every_backend(
+    monkeypatch,
+) -> None:
+    """Every backend answers schema-invalid JSON: the error that leaves the
+    chain must be LLMMalformedOutputError (the type every agent handler
+    catches) regardless of WHICH backend produced it, and the requests must
+    really have visited each backend's endpoint before the budget ran out."""
+    # Budget covers the whole chain so the hop walk reaches the paid final
+    # tier instead of propagating two hops earlier.
+    monkeypatch.setenv("LLM_MAX_MALFORMED_HOPS", "4")
+    provider = _wire_chain(
+        monkeypatch, role="planner", primary=_PRIMARY, fallbacks=_FALLBACKS
+    )
+    urls = _patch_http(
+        monkeypatch,
+        MALFORMED_RESPONSE,
+        MALFORMED_RESPONSE,
+        MALFORMED_RESPONSE,
+        MALFORMED_RESPONSE,
+        MALFORMED_RESPONSE,
+    )
+
+    with pytest.raises(LLMMalformedOutputError):
+        run(provider.structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert len(urls) == 5  # one attempt per hop, no same-model retries
+    assert urls[0].startswith(f"{BACKENDS['nvidia']}/chat/completions")
+    assert any(
+        url.startswith(f"{BACKENDS['openrouter']}/chat/completions") for url in urls
+    )
+    assert any(url.startswith(f"{BACKENDS['groq']}/chat/completions") for url in urls)
+    assert any(
+        url.startswith(f"{BACKENDS['inception']}/chat/completions") for url in urls
+    )
+
+
+def test_malformed_output_hops_across_backends_to_success(monkeypatch) -> None:
+    """A malformed answer from NVIDIA hops to Inception's endpoint and
+    succeeds — malformed handling is backend-independent in BOTH directions."""
+    provider = _wire_chain(
+        monkeypatch,
+        role="developer",
+        primary=_PRIMARY,
+        fallbacks="inception::mercury-2.5",
+    )
+    urls = _patch_http(monkeypatch, MALFORMED_RESPONSE, DEFAULT_PLAN_RESPONSE)
+
+    plan = run(provider.structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert isinstance(plan, Plan)
+    assert urls == [
+        f"{BACKENDS['nvidia']}/chat/completions",
+        f"{BACKENDS['inception']}/chat/completions",
+    ]
+
+
+def test_malformed_output_propagates_typed_from_inception_hop(monkeypatch) -> None:
+    """The LAST tier is the paid Inception model: when IT is the one coming
+    back malformed, the propagating error is still LLMMalformedOutputError."""
+    provider = _wire_chain(
+        monkeypatch,
+        role="developer",
+        primary=_PRIMARY,
+        fallbacks="inception::mercury-2.5",
+    )
+    urls = _patch_http(monkeypatch, MALFORMED_RESPONSE, MALFORMED_RESPONSE)
+
+    with pytest.raises(LLMMalformedOutputError):
+        run(provider.structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert urls == [
+        f"{BACKENDS['nvidia']}/chat/completions",
+        f"{BACKENDS['inception']}/chat/completions",
+    ]

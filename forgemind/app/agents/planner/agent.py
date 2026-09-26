@@ -214,8 +214,9 @@ def build_provider(role: str = "planner"):
     """Construct the LLM provider from settings/env (shared by all agents).
 
     Order: a real backend when any API key is configured (OpenRouter,
-    Groq, NVIDIA); else the stub provider when ``FORGEMIND_MOCK_LLM=1``
-    (tests / key-less dev); else a clear ``PlannerConfigError``.
+    Groq, NVIDIA, Inception); else the stub provider when
+    ``FORGEMIND_MOCK_LLM=1`` (tests / key-less dev); else a clear
+    ``PlannerConfigError``.
 
     ``role`` selects the stub provider's per-schema script (research vs
     developer propose different first tool calls), so each agent builds its
@@ -229,7 +230,8 @@ def build_provider(role: str = "planner"):
 
     Each chain entry may carry a backend prefix selecting its endpoint:
     ``groq::slug`` -> Groq, ``nvidia::slug`` -> NVIDIA's integrate API,
-    bare slug -> OpenRouter (default). Chains may mix backends freely.
+    ``inception::slug`` -> Inception's Mercury API, bare slug -> OpenRouter
+    (default). Chains may mix backends freely.
     """
     from app.llm.config import (
         get_fallback_models_for_role,
@@ -309,6 +311,7 @@ def build_provider(role: str = "planner"):
         "openrouter": settings.openrouter_api_key,
         "groq": settings.groq_api_key,
         "nvidia": settings.nvidia_api_key,
+        "inception": settings.inception_api_key,
     }
 
     def _key_for(backend: str) -> str:
@@ -339,8 +342,8 @@ def build_provider(role: str = "planner"):
     if not resolved and not any(backend_keys.values()):
         raise PlannerConfigError(
             "no LLM provider configured: set OPENROUTER_API_KEY / GROQ_API_KEY / "
-            "NVIDIA_API_KEY (and LLM_MODEL_<ROLE>), or FORGEMIND_MOCK_LLM=1 "
-            "for key-less development"
+            "NVIDIA_API_KEY / INCEPTION_API_KEY (and LLM_MODEL_<ROLE>), or "
+            "FORGEMIND_MOCK_LLM=1 for key-less development"
         )
 
     def _provider(entry: tuple[str, str, str, str]) -> OpenAICompatibleProvider:

@@ -2,7 +2,8 @@
 
 One class serves every OpenAI-compatible chat/completions backend —
 OpenRouter, Groq's ``api.groq.com/openai/v1``, NVIDIA's
-``integrate.api.nvidia.com/v1``, or any self-hosted gateway — parameterized
+``integrate.api.nvidia.com/v1``, Inception's
+``api.inceptionlabs.ai/v1``, or any self-hosted gateway — parameterized
 by ``base_url`` + ``api_key`` + ``model``. All response-shape hardening is
 backend-agnostic by construction (it operates on the OpenAI envelope, not
 on vendor-specific fields):
@@ -15,8 +16,9 @@ so the bounded retry + FallbackLLMProvider machinery behaves identically no
 matter which backend a role is pointed at.
 
 Model slugs may carry a backend prefix (``"groq::openai/gpt-oss-120b"``,
-``"nvidia::meta/llama-3.3-70b-instruct"``); bare slugs default to the
-OpenRouter endpoint. See :func:`app.llm.config.split_backend_slug`.
+``"nvidia::meta/llama-3.3-70b-instruct"``, ``"inception::mercury-2.5"``);
+bare slugs default to the OpenRouter endpoint. See
+:func:`app.llm.config.split_backend_slug`.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ BACKENDS: dict[str, str] = {
     "openrouter": "https://openrouter.ai/api/v1",
     "groq": "https://api.groq.com/openai/v1",
     "nvidia": "https://integrate.api.nvidia.com/v1",
+    "inception": "https://api.inceptionlabs.ai/v1",
 }
 
 
@@ -71,7 +74,8 @@ class OpenAICompatibleProvider(LLMProvider):
 
     def _headers(self) -> dict[str, str]:
         # Plain Bearer + JSON: the intersection of what OpenRouter, Groq,
-        # and NVIDIA all accept — no vendor-specific headers anywhere.
+        # NVIDIA, and Inception all accept — no vendor-specific headers
+        # anywhere.
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",

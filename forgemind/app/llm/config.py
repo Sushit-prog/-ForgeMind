@@ -24,7 +24,7 @@ from app.config import get_settings
 # slug defaults to the OpenRouter endpoint — byte-for-byte today's behavior.
 _BACKEND_PREFIX_RE = re.compile(r"^([a-z][a-z0-9_]*)::(.+)$")
 
-KNOWN_BACKENDS = frozenset({"openrouter", "groq", "nvidia"})
+KNOWN_BACKENDS = frozenset({"openrouter", "groq", "nvidia", "inception"})
 
 
 def split_backend_slug(entry: str) -> tuple[str, str]:
