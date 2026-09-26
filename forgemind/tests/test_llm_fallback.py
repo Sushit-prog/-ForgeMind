@@ -7,9 +7,13 @@ Two seams, no network:
    agent silently ran on LLM_MODEL_PLANNER. This file is the regression
    net that was missing when that shipped.
 2. The fallback chain hops to the next model ONLY after a model's bounded
-   transient-retry budget is exhausted (429 free-tier rate limits above
-   all); non-transient errors propagate immediately — fallback is for
-   availability, never for correctness.
+    transient-retry budget is exhausted (429 free-tier rate limits above
+    all); non-transient errors propagate immediately — fallback is for
+    availability, never for correctness. Malformed output gets its own
+    BOUNDED hop (free-tier models emit schema-invalid JSON in json_mode):
+    it may hop to the next model up to ``max_malformed_hops``, then the
+    malformed error propagates — never an implicit success (see the
+    malformed tests below).
 """
 
 from __future__ import annotations
@@ -105,14 +109,115 @@ def test_non_transient_error_raises_immediately_never_falls_back() -> None:
     assert never_called.attempts == 0  # …and NEVER falls through to B
 
 
-def test_malformed_output_propagates_without_fallback() -> None:
+def test_malformed_output_hops_to_next_model_boundedly() -> None:
+    # Default: bounded malformed fallback ON. A malformed response from the
+    # primary hops to the next model — the free-tier reality that motivated it.
     malformed = ScriptedProvider(MALFORMED_RESPONSE)
-    never_called = ScriptedProvider(DEFAULT_PLAN_RESPONSE)
+    healthy = ScriptedProvider(DEFAULT_PLAN_RESPONSE)
+
+    plan = run(_chain(malformed, healthy).structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert isinstance(plan, Plan)
+    assert malformed.attempts == 1
+    assert healthy.attempts == 1
+
+
+def test_malformed_budget_exhausted_propagates_never_succeeds_silently() -> None:
+    # Every model malformed: the LAST malformed error propagates after bounded
+    # hops — a partially-valid object is never synthesized.
+    malformed_a = ScriptedProvider(MALFORMED_RESPONSE)
+    malformed_b = ScriptedProvider(MALFORMED_RESPONSE)
 
     with pytest.raises(LLMMalformedOutputError):
-        run(_chain(malformed, never_called).structured_output([], Plan))  # type: ignore[arg-type]
+        run(_chain(malformed_a, malformed_b).structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert malformed_a.attempts == 1
+    assert malformed_b.attempts == 1
+
+
+def test_malformed_fallback_disabled_propagates_immediately() -> None:
+    # fallback_on_malformed=False restores the old strict contract: malformed
+    # propagates at once, the next model is never consulted.
+    malformed = ScriptedProvider(MALFORMED_RESPONSE)
+    never_called = ScriptedProvider(DEFAULT_PLAN_RESPONSE)
+    chain = FallbackLLMProvider(
+        [("model-a", malformed), ("model-b", never_called)],
+        max_retries=2,
+        backoff_base_seconds=0.01,
+        fallback_on_malformed=False,
+    )
+
+    with pytest.raises(LLMMalformedOutputError):
+        run(chain.structured_output([], Plan))  # type: ignore[arg-type]
 
     assert malformed.attempts == 1
+    assert never_called.attempts == 0
+
+
+def test_malformed_hop_limit_zero_behaves_like_disabled() -> None:
+    malformed = ScriptedProvider(MALFORMED_RESPONSE)
+    never_called = ScriptedProvider(DEFAULT_PLAN_RESPONSE)
+    chain = FallbackLLMProvider(
+        [("model-a", malformed), ("model-b", never_called)],
+        max_retries=2,
+        backoff_base_seconds=0.01,
+        max_malformed_hops=0,
+    )
+
+    with pytest.raises(LLMMalformedOutputError):
+        run(chain.structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert malformed.attempts == 1
+    assert never_called.attempts == 0
+
+
+def test_json_validate_400_hops_like_malformed() -> None:
+    # The raw-HTTP form of malformed output: a 400 body complaining about
+    # JSON validation (json_mode violated upstream). Same bounded hop.
+    json_reject = ScriptedProvider(
+        LLMProviderError(400, "Failed to validate JSON request: invalid json")
+    )
+    healthy = ScriptedProvider(DEFAULT_PLAN_RESPONSE)
+
+    plan = run(_chain(json_reject, healthy).structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert isinstance(plan, Plan)
+    assert json_reject.attempts == 1
+    assert healthy.attempts == 1
+
+
+def test_json_validate_400_chain_exhaustion_propagates_as_malformed_error() -> None:
+    # REGRESSION (real-proof bug): when hop-mode classifies a FAILURE as
+    # malformed (a raw LLMProviderError 400 whose body carries a json cue)
+    # and the whole chain comes back that way, the propagating error must be
+    # typed LLMMalformedOutputError — the type EVERY agent handler catches.
+    # Re-raising the raw provider 400 verbatim escapes every handler and
+    # surfaces as an uncaught agent crash (3 replans, then ESCALATED).
+    json_reject_a = ScriptedProvider(
+        LLMProviderError(400, "Failed to validate JSON request: invalid json")
+    )
+    json_reject_b = ScriptedProvider(
+        LLMProviderError(400, "Failed to validate JSON request: invalid json")
+    )
+
+    with pytest.raises(LLMMalformedOutputError):
+        run(_chain(json_reject_a, json_reject_b).structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert json_reject_a.attempts == 1
+    assert json_reject_b.attempts == 1
+
+
+def test_unrelated_400_still_propagates_immediately() -> None:
+    # A 400 with NO json/validate cue (bad model name, auth, request size)
+    # is a real error — hop must NOT engage, exactly as before.
+    broken = ScriptedProvider(BAD_REQUEST)  # "bad request", no json cue
+    never_called = ScriptedProvider(DEFAULT_PLAN_RESPONSE)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        run(_chain(broken, never_called).structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert exc_info.value.status_code == 400
+    assert broken.attempts == 1
     assert never_called.attempts == 0
 
 

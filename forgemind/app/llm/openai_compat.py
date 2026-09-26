@@ -32,7 +32,11 @@ from app.llm.provider import LLMProvider, Message, parse_and_validate
 logger = logging.getLogger(__name__)
 
 # HTTP statuses treated as transient (retried by the caller with backoff).
-TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# 0 is NOT an HTTP status — it is the synthetic code we assign to transport
+# failures (connection refused/reset, DNS, TLS) in _chat; a flapping proxy or
+# transient network blip must get the same bounded retry as a 5xx, not crash
+# the agent on first contact.
+TRANSIENT_STATUSES = frozenset({0, 408, 429, 500, 502, 503, 504})
 
 # Known OpenAI-compatible backends and their base URLs. API keys are NOT
 # stored here — they resolve from Settings per backend at provider build

@@ -368,6 +368,8 @@ def build_provider(role: str = "planner"):
     return FallbackLLMProvider(
         [(entry[0], _provider(entry)) for entry in resolved],
         max_retries=settings.llm_max_retries,
+        fallback_on_malformed=settings.llm_fallback_on_malformed,
+        max_malformed_hops=settings.llm_max_malformed_hops,
     )
 
 

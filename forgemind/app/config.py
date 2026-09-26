@@ -167,6 +167,21 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(
         default=2, description="Bounded transient (timeout/5xx) retries per call."
     )
+    llm_fallback_on_malformed: bool = Field(
+        default=True,
+        description=(
+            "Bounded fallback to the next model when a free-tier model "
+            "returns schema-invalid JSON (env: LLM_FALLBACK_ON_MALFORMED)."
+        ),
+    )
+    llm_max_malformed_hops: int = Field(
+        default=2,
+        description=(
+            "Max malformed-triggered hops per request before the malformed "
+            "error propagates; 0 restores immediate propagation "
+            "(env: LLM_MAX_MALFORMED_HOPS)."
+        ),
+    )
     # Research agent (Phase 6): hard cap on tool calls per task before a
     # forced synthesis — the budget-limiting pattern from Section 42.
     max_research_tool_calls: int = Field(
