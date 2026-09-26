@@ -19,6 +19,7 @@ from app.llm import (
     LLMProviderError,
     LLMTimeoutError,
     StubLLMProvider,
+    is_model_deprecated_error,
     is_transient_error,
     parse_and_validate,
 )
@@ -111,6 +112,38 @@ def test_is_transient_error_classification() -> None:
     assert not is_transient_error(LLMProviderError(401, "bad key"))
     assert not is_transient_error(LLMProviderError(400, "bad request"))
     assert not is_transient_error(ValueError("unrelated"))
+
+
+# --- model-deprecated 404 classification (live incident: OpenRouter retired
+# --- z-ai/glm-5.2:free to paid; the 404 crashed the role instead of hopping) --
+
+# Captured verbatim from docker logs 2026-09-26T12:30:45Z (user_id truncated).
+OPENROUTER_DEPRECATED_404_BODY = (
+    '{"error":{"message":"This model is unavailable for free. The paid version '
+    'is available now - use this slug instead: z-ai/glm-5.2","code":404},'
+    '"user_id":"user_redacted"}'
+)
+
+
+def test_is_model_deprecated_error_matches_captured_shape() -> None:
+    assert is_model_deprecated_error(404, OPENROUTER_DEPRECATED_404_BODY)
+    assert is_model_deprecated_error(404, OPENROUTER_DEPRECATED_404_BODY.lower())
+
+
+def test_generic_404_is_not_deprecated() -> None:
+    assert not is_model_deprecated_error(404, '{"detail":"Not Found"}')
+    assert not is_model_deprecated_error(404, "Not Found")
+    assert not is_model_deprecated_error(
+        404, '{"error":{"message":"model not found","code":404}}'
+    )
+    assert not is_model_deprecated_error(404, "")
+
+
+def test_deprecation_cues_require_status_404() -> None:
+    cues = "This model is unavailable for free - use this slug instead: x/y"
+    assert not is_model_deprecated_error(400, cues)
+    assert not is_model_deprecated_error(500, cues)
+    assert not is_model_deprecated_error(0, cues)
 
 
 # --- null-content guard (run #3 incident: reasoning models answering

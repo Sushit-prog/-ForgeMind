@@ -58,6 +58,26 @@ def is_transient_error(exc: Exception) -> bool:
     return isinstance(exc, LLMProviderError) and exc.status_code in TRANSIENT_STATUSES
 
 
+# OpenRouter retires free slugs to paid with HTTP 404 and a message like
+# "This model is unavailable for free. The paid version is available now -
+# use this slug instead: z-ai/glm-5.2" (live incident: the whole Researcher
+# role crashed instead of hopping). A 404 is deterministic for that model —
+# retrying it can never succeed — but must NOT make every 404 hoppable
+# (a genuine wrong-endpoint 404 stays fatal). Both distinctive phrases of
+# the actual payload are required (AND): a plain "Not Found" body matches
+# neither. Requiring "code":404 inside the body would be redundant with the
+# status_code gate.
+_DEPRECATED_404_CUES = ("unavailable for free", "use this slug instead")
+
+
+def is_model_deprecated_error(status_code: int, body: object) -> bool:
+    """True ONLY for OpenRouter's retired-model 404 shape (exact match)."""
+    if status_code != 404:
+        return False
+    text = str(body).lower()
+    return all(cue in text for cue in _DEPRECATED_404_CUES)
+
+
 class OpenAICompatibleProvider(LLMProvider):
     def __init__(
         self,

@@ -7,7 +7,11 @@ from app.llm.errors import (
 )
 from app.llm.fallback import FallbackLLMProvider
 from app.llm.mock import MALFORMED_RESPONSE, DEFAULT_PLAN_RESPONSE, StubLLMProvider
-from app.llm.openrouter import OpenRouterProvider, is_transient_error
+from app.llm.openrouter import (
+    OpenRouterProvider,
+    is_model_deprecated_error,
+    is_transient_error,
+)
 from app.llm.provider import LLMProvider, Message, parse_and_validate
 
 __all__ = [
@@ -24,6 +28,7 @@ __all__ = [
     "StubLLMProvider",
     "get_fallback_models_for_role",
     "get_model_for_role",
+    "is_model_deprecated_error",
     "is_transient_error",
     "known_roles",
     "parse_and_validate",

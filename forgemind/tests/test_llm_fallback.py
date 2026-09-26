@@ -578,3 +578,101 @@ def test_malformed_output_propagates_typed_from_inception_hop(monkeypatch) -> No
         f"{BACKENDS['nvidia']}/chat/completions",
         f"{BACKENDS['inception']}/chat/completions",
     ]
+
+
+# --- model-deprecated 404 (live incident: retired free slug) ----------------
+
+
+# Captured verbatim from docker logs 2026-09-26T12:30:45Z (user_id truncated).
+OPENROUTER_DEPRECATED_404 = (
+    '{"error":{"message":"This model is unavailable for free. The paid version '
+    'is available now - use this slug instead: z-ai/glm-5.2","code":404},'
+    '"user_id":"user_redacted"}'
+)
+GENERIC_404_BODY = '{"detail":"Not Found"}'
+
+
+def _patch_http_error(monkeypatch, status_code: int, body: str) -> list[str]:
+    """Like ``_patch_http`` but every POST fails with the given HTTP status +
+    raw body — exercises the real ``_chat`` non-200 raise path."""
+    import app.llm.openai_compat as compat
+
+    urls: list[str] = []
+
+    class _ErrResponse:
+        def __init__(self) -> None:
+            self.status_code = status_code
+            self.text = body
+
+        def json(self):
+            return {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            urls.append(url)
+            return _ErrResponse()
+
+    monkeypatch.setattr(compat.httpx, "AsyncClient", lambda **kw: _Client())
+    return urls
+
+
+def test_model_deprecated_404_hops_immediately_without_retry(caplog) -> None:
+    """The captured retired-slug 404 must hop to the next chain entry on the
+    FIRST attempt — a deterministic 404 never becomes a 200, so no retry
+    budget may be burned on it (contrast: 429 burns max_retries first)."""
+    import logging
+
+    deprecated = ScriptedProvider(LLMProviderError(404, OPENROUTER_DEPRECATED_404))
+    healthy = ScriptedProvider(DEFAULT_PLAN_RESPONSE)
+
+    with caplog.at_level(logging.WARNING, logger="app.llm.fallback"):
+        plan = run(_chain(deprecated, healthy).structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert isinstance(plan, Plan)
+    assert deprecated.attempts == 1  # immediate hop — no same-model retries
+    assert healthy.attempts == 1
+    assert any("model-deprecated" in r.getMessage() for r in caplog.records)
+
+
+def test_generic_404_still_fatal_never_hops() -> None:
+    """A 404 of any OTHER shape (bad endpoint, wrong path) must keep today's
+    behavior: propagate as a fatal LLMProviderError, no fallback hop."""
+    not_found = ScriptedProvider(LLMProviderError(404, GENERIC_404_BODY))
+    never_called = ScriptedProvider(DEFAULT_PLAN_RESPONSE)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        run(_chain(not_found, never_called).structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert exc_info.value.status_code == 404
+    assert not_found.attempts == 1  # a real error is not retried…
+    assert never_called.attempts == 0  # …and NEVER falls through to B
+
+
+def test_deprecated_404_hops_end_to_end_through_chat(monkeypatch) -> None:
+    """Full path: raw HTTP 404 from _chat -> hop gate -> next chain entry —
+    exactly how the live Researcher crash traverses the code."""
+    urls = _patch_http_error(monkeypatch, 404, OPENROUTER_DEPRECATED_404)
+    retired = OpenAICompatibleProvider(
+        api_key="k", base_url=BACKENDS["openrouter"], model="z-ai/glm-5.2:free"
+    )
+    healthy = ScriptedProvider(DEFAULT_PLAN_RESPONSE)
+    provider = FallbackLLMProvider(
+        [("z-ai/glm-5.2:free", retired), ("z-ai/glm-5.2", healthy)],
+        max_retries=2,
+        backoff_base_seconds=0.01,
+    )
+
+    plan = run(provider.structured_output([], Plan))  # type: ignore[arg-type]
+
+    assert isinstance(plan, Plan)
+    assert urls == [f"{BACKENDS['openrouter']}/chat/completions"]  # one POST only
+    assert healthy.attempts == 1

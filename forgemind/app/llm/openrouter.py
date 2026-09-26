@@ -16,6 +16,7 @@ from __future__ import annotations
 from app.llm.openai_compat import (
     TRANSIENT_STATUSES,
     OpenAICompatibleProvider,
+    is_model_deprecated_error,
     is_transient_error,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "TRANSIENT_STATUSES",
     "OpenAICompatibleProvider",
     "OpenRouterProvider",
+    "is_model_deprecated_error",
     "is_transient_error",
 ]

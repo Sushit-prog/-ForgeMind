@@ -20,6 +20,11 @@ propagates; a partially-valid object is never produced). Set
 ``fallback_on_malformed=False`` (or a ``malformed_hop_limit`` of 0) for the
 exact old behavior — immediate propagation.
 
+A model-deprecated 404 (OpenRouter's "unavailable for free … use this slug
+instead" retirement, see ``is_model_deprecated_error``) hops IMMEDIATELY —
+deterministic for that model, so no retry budget is wasted on it — while a
+bare 404 of any other shape stays fatal.
+
 Only when EVERY model in the chain is exhausted does the call raise (the
 last error). Each hop is logged (which model failed, why, which model it
 fell to) so a fallback event is visible in the audit trail alongside
@@ -35,7 +40,7 @@ from typing import Sequence, cast
 from pydantic import BaseModel
 
 from app.llm.errors import LLMMalformedOutputError, LLMProviderError
-from app.llm.openrouter import is_transient_error
+from app.llm.openrouter import is_model_deprecated_error, is_transient_error
 from app.llm.provider import LLMProvider, Message
 
 logger = logging.getLogger(__name__)
@@ -143,6 +148,7 @@ class FallbackLLMProvider(LLMProvider):
         for index, (model_name, provider) in enumerate(self._chain):
             attempt = 0
             malformed = False
+            deprecated = False
             while True:
                 try:
                     call = getattr(provider, method_name)
@@ -168,6 +174,17 @@ class FallbackLLMProvider(LLMProvider):
                             raise self._as_malformed_error(exc)
                         malformed = True
                         break  # hop to the next model — do not retry SAME one
+                    if isinstance(
+                        exc, LLMProviderError
+                    ) and is_model_deprecated_error(exc.status_code, exc.body):
+                        # Retired (free->paid) model: deterministic for THIS
+                        # hop — retrying a 404 that can never become a 200 only
+                        # burns budget, so hop at once (malformed-path
+                        # semantics). TRANSIENT_STATUSES is untouched: a bare
+                        # 404 that does not match the deprecation shape still
+                        # falls through to the raise below.
+                        deprecated = True
+                        break
                     if not is_transient_error(exc):
                         raise  # correctness problem — propagate, no fallback
                     if attempt >= self.max_retries:
@@ -187,6 +204,14 @@ class FallbackLLMProvider(LLMProvider):
                     next_model,
                     malformed_hops,
                     self.max_malformed_hops,
+                )
+            elif deprecated:
+                logger.warning(
+                    "llm fallback: model %s returned model-deprecated 404 (%s); "
+                    "hopping to model %s immediately (no retry — deterministic)",
+                    model_name,
+                    last_error,
+                    next_model,
                 )
             else:
                 logger.warning(
