@@ -28,6 +28,11 @@ dev = [
     "pytest-asyncio>=0.23",
 ]
 
+# `forgemind` console script: a thin client around the HTTP API
+# (app/cli.py). Installed as `forgemind` by `pip install -e .`.
+[project.scripts]
+forgemind = "app.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["app*"]
 
